@@ -1,4 +1,5 @@
 from typing import Optional
+import io
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pathlib import Path
@@ -15,8 +16,9 @@ from dsp_core.audio_fx import (
 )
 from dsp_core.visualizer import (
     generate_comparison_plot, build_visualization_data, filter_response_bars,
-    build_activity_data, build_pitch_data, build_morph_data,
+    build_activity_data, build_pitch_data, build_morph_data, build_bird_data,
 )
+from dsp_core.bird_detector import classify_bird_sound
 
 router = APIRouter()
 
@@ -42,6 +44,9 @@ async def process_audio(
     morph_mode: str = Form("pitch"),
     n_steps: float = Form(4.0),
     rate: float = Form(1.5),
+    delay_ms: float = Form(280.0),
+    decay: float = Form(0.55),
+    repeats: int = Form(5),
 ):
 
     # 1. Save to uploads/
@@ -71,9 +76,9 @@ async def process_audio(
         y_ir, _ = librosa.load(ir_path, sr=sr)
         y_modified = apply_convolution(y, y_ir)
     elif effect == "echo":
-        y_modified = apply_echo(y, sr)
+        y_modified = apply_echo(y, sr, delay_seconds=delay_ms / 1000.0, decay=decay, repeats=repeats)
     elif effect == "delay":
-        y_modified = apply_delay(y, sr)
+        y_modified = apply_delay(y, sr, delay_seconds=delay_ms / 1000.0, wet=decay)
     elif effect == "reverb":
         y_modified = apply_reverb(y, sr)
     elif effect == "amplify":
@@ -125,6 +130,37 @@ async def process_audio(
         "activity": activity_data,
         "pitch": pitch_data,
         "morph": morph_data,
+    }
+
+
+@router.post("/detect-bird")
+async def detect_bird(file: UploadFile = File(...)):
+    """Bird Sound Detector — Record 3s -> Identify.
+
+    Deliberately does NOT write the microphone clip to static/uploads (or
+    anywhere else on disk): the bytes are decoded straight out of memory
+    with librosa, classified, and then discarded when this request ends.
+    This is the only route in the app that behaves this way; every other
+    /process-audio effect still persists its input/output because those
+    are uploaded files the user is choosing to process, not live mic audio.
+    """
+    raw_bytes = await file.read()
+
+    try:
+        y, sr = librosa.load(io.BytesIO(raw_bytes), sr=None, mono=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not decode the recorded audio clip.")
+
+    if y.size == 0:
+        raise HTTPException(status_code=400, detail="Recorded clip was empty.")
+
+    detection = classify_bird_sound(y, sr)
+    visualization = build_bird_data(y, sr, detection)
+
+    return {
+        "status": "Bird sound analyzed.",
+        "detection": detection,
+        "visualization": visualization,
     }
 
 

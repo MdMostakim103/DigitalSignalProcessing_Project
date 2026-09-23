@@ -1315,11 +1315,11 @@ function AmplitudeDynamics() {
                 <button className="back-button" onClick={() => { window.location.hash = "modules"; }} disabled={processing}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 01 / AMPLITUDE &amp; DYNAMICS</span>
+                <span>MODULE 01 / AMPLITUDE &amp; GAIN</span>
             </header>
 
             <section className="module-intro">
-                <p className="section-label">AMPLITUDE &amp; DYNAMICS</p>
+                <p className="section-label">AMPLITUDE &amp; GAIN</p>
                 <h1>CHANGE THE <span>ENERGY</span><br />OF YOUR SIGNAL.</h1>
                 <p>
                     Watch the signal move through the operation: samples are read from left to right,

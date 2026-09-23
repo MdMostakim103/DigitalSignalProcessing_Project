@@ -7,6 +7,7 @@ import FrequencyFiltering from "./pages/FrequencyFiltering";
 import SpeechActivity from "./pages/SpeechActivity";
 import SpectralDetection from "./pages/SpectralDetection";
 import VoiceMorphing from "./pages/VoiceMorphing";
+import BirdDetector from "./pages/BirdDetector";
 
 function getRoute() {
     const hash = window.location.hash;
@@ -17,6 +18,7 @@ function getRoute() {
     if (hash === "#module/04") return "speechActivity";
     if (hash === "#module/05") return "spectralDetection";
     if (hash === "#module/06") return "voiceMorphing";
+    if (hash === "#module/BONUS") return "birdDetector";
 
     return "home";
 }
@@ -37,6 +39,7 @@ function App() {
     if (route === "speechActivity") return <SpeechActivity />;
     if (route === "spectralDetection") return <SpectralDetection />;
     if (route === "voiceMorphing") return <VoiceMorphing />;
+    if (route === "birdDetector") return <BirdDetector />;
 
     return <Home />;
 }

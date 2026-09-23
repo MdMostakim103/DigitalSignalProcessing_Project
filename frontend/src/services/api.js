@@ -45,6 +45,27 @@ export async function processAudio(
     return await response.json();
 }
 
+// Sends a short recorded clip (already encoded as a WAV Blob in the
+// browser) to the traditional-DSP Bird Sound Detector. Nothing about this
+// clip is saved by the backend; it's decoded, measured, and discarded in
+// the same request.
+export async function detectBirdSound(blob) {
+    const formData = new FormData();
+    formData.append("file", blob, "bird_clip.wav");
+
+    const response = await fetch(`${API_BASE_URL}/detect-bird`, {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        const message = await response.text().catch(() => "");
+        throw new Error(message || "Bird detection failed");
+    }
+
+    return await response.json();
+}
+
 // Fetches just the filter's own |H(f)| curve — no audio file needed — so a
 // live preview graph can update as the user drags cutoff/order sliders.
 export async function getFilterResponse({ filterFamily, bandType, cutoff, cutoff2, order, sampleRate }) {

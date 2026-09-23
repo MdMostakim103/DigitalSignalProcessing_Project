@@ -47,4 +47,12 @@ export const modules = [
         intro: "Visualize a simplified phase-vocoder workflow for changing pitch while preserving timing.",
         stages: ["Frame signal", "Spectrum + phase", "Shift bins", "Reconstruct"],
     },
+    {
+        number: "BONUS",
+        title: "Bird Sound Detector",
+        shortTitle: "BIRD ID",
+        description: "Record 3 seconds and match the call to a species using classic DSP features, no AI.",
+        intro: "Extract energy, zero-crossing rate, and spectral-shape features, then compare by weighted distance.",
+        stages: ["Record clip", "Extract features", "Compare to references", "Report closest match"],
+    },
 ];

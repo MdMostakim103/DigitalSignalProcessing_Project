@@ -71,16 +71,27 @@ def _downsample_time(signal: np.ndarray, points: int = 180) -> list[float]:
     values = np.zeros(count, dtype=np.float32)
     for i in range(count):
         chunk = signal[edges[i]:max(edges[i] + 1, edges[i + 1])]
-        values[i] = float(np.mean(chunk))
+        if not chunk.size:
+            continue
+        # Keep the strongest excursion's *size* in each chunk, not the mean —
+        # averaging a fast-oscillating signal lets positive and negative
+        # samples cancel out, which produced a noisy, misleading curve
+        # instead of the signal's actual loudness envelope. The *sign* comes
+        # from the chunk's overall trend (its mean), not from the single
+        # loudest sample: 16-bit PCM can store -0.5 exactly but not +0.5
+        # (it lands at ~0.49997), so picking the sign off one sample makes a
+        # perfectly symmetric wave render as entirely negative.
+        peak_abs = float(np.max(np.abs(chunk)))
+        values[i] = -peak_abs if float(np.mean(chunk)) < 0 else peak_abs
 
-    # Gentle triangular smoothing gives the frontend a clean curve while the
-    # original audio samples remain untouched for playback and DSP.
-    radius = max(2, count // 35)
-    kernel = np.arange(1, radius + 2, dtype=np.float32)
-    kernel = np.concatenate([kernel, kernel[-2::-1]])
-    kernel /= kernel.sum()
-    smoothed = np.convolve(values, kernel, mode='same')
-    return smoothed.astype(float).tolist()
+    # No smoothing here on purpose. A triangular blur (used previously) mixes
+    # each point with its neighbours — harmless for slow-varying loudness,
+    # but when a chunk's dominant sign alternates from one point to the next
+    # (common once the display's point spacing is close to the audio's own
+    # period), averaging +peak next to -peak cancels most of the amplitude
+    # right back out, the same cancellation problem this function exists to
+    # avoid. Returning the per-chunk peaks directly keeps the true amplitude.
+    return values.astype(float).tolist()
 
 
 def _bin_magnitude(frequencies: np.ndarray, magnitude: np.ndarray, max_frequency: float, bins: int = 56) -> dict:
@@ -288,6 +299,18 @@ def filter_response_bars(freqs: np.ndarray, magnitude: np.ndarray, sr: int, bins
     with the input/output spectra in the frequency-domain visualization."""
     max_frequency = min(float(sr / 2), 20000.0)
     return _bin_magnitude(np.asarray(freqs), np.asarray(magnitude), max_frequency, bins)
+
+
+def build_bird_data(y: np.ndarray, sr: int, detection: dict) -> dict:
+    """Time waveform + spectrum bars for the recorded clip, reusing the
+    same _downsample_time/_spectrum building blocks every other module
+    uses, plus the detection result so the frontend has one payload to
+    render from."""
+    return {
+        "waveform": _downsample_time(y),
+        "spectrum": _spectrum(y, sr),
+        "detection": detection,
+    }
 
 
 def build_visualization_data(
