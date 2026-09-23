@@ -1,0 +1,50 @@
+# =========================
+# Python & Backend
+# =========================
+# Ignore virtual environments
+backend/env/
+env/
+venv/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Node & Frontend
+# =========================
+# Ignore massive node packages
+frontend/node_modules/
+node_modules/
+
+# Ignore production build folders
+frontend/dist/
+
+# =========================
+# User Uploads & Media
+# =========================
+# Ignore the massive test audio files and generated plots
+# (But we will keep the folders themselves!)
+backend/static/uploads/*
+backend/static/processed/*
+backend/static/plots/*
+
+# =========================
+# Backup archives
+# =========================
+*.zip
+
+# =========================
+# Local dev tooling
+# =========================
+.claude/
+
+# =========================
+# OS Generated Files
+# =========================
+.DS_Store
+Thumbs.db
+!backend/static/uploads/.gitkeep
+!backend/static/processed/.gitkeep
+!backend/static/plots/.gitkeep

@@ -1,0 +1,117 @@
+.modules-section {
+    padding: 120px 8%;
+}
+
+.section-heading {
+    max-width: 700px;
+    margin-bottom: 60px;
+}
+
+.section-label {
+    color: var(--text-muted);
+    font-size: 12px;
+    letter-spacing: 4px;
+    font-weight: 600;
+    margin-bottom: 20px;
+}
+
+.section-heading h2 {
+    font-size: clamp(40px, 5vw, 70px);
+    line-height: 0.95;
+    letter-spacing: -3px;
+}
+
+.section-heading h2 span {
+    color: var(--text-secondary);
+}
+
+.section-description {
+    margin-top: 25px;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    max-width: 550px;
+}
+
+.modules-grid {
+    display: grid;
+
+    grid-template-columns: repeat(3, 1fr);
+
+    gap: 15px;
+}
+
+.module-card {
+    min-height: 260px;
+
+    position: relative;
+
+    padding: 30px;
+
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+
+    background: var(--surface);
+
+    border: 1px solid var(--border);
+    border-radius: var(--radius-medium);
+
+    transition: var(--transition-normal);
+
+    overflow: hidden;
+}
+
+.module-card:hover {
+    background: var(--surface-hover);
+    transform: translateY(-6px);
+}
+
+.module-number {
+    color: var(--text-muted);
+
+    font-size: 12px;
+    letter-spacing: 2px;
+}
+
+.module-content h3 {
+    font-size: 22px;
+    margin-bottom: 12px;
+}
+
+.module-content p {
+    color: var(--text-secondary);
+
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.module-arrow {
+    position: absolute;
+
+    right: 25px;
+    top: 25px;
+
+    font-size: 24px;
+
+    color: var(--text-muted);
+
+    transition: var(--transition-fast);
+}
+
+.module-card:hover .module-arrow {
+    color: var(--text-primary);
+    transform: translate(3px, -3px);
+}
+.module-card { cursor: pointer; }
+.module-card:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 3px;
+}
+@media (max-width: 900px) {
+    .modules-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 620px) {
+    .modules-section { padding: 90px 5%; }
+    .modules-grid { grid-template-columns: 1fr; }
+    .module-card { min-height: 220px; }
+}
