@@ -58,6 +58,16 @@ const BAND_DEFAULTS = {
 
 const ORDER_RANGE = { min: 1, max: 10, step: 1 };
 
+// A band (bandpass/bandstop) always needs fL strictly below fH — scipy's
+// filter design rejects a degenerate or inverted band, so the sliders are
+// clamped against each other rather than letting the user pick an invalid
+// pair and only finding out after pressing run.
+const MIN_BAND_GAP_HZ = 10;
+
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+
 function formatBytes(bytes) {
     if (!bytes) return "";
     if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -370,7 +380,10 @@ export default function FrequencyFiltering() {
                             value={cutoff}
                             disabled={isProcessing}
                             style={{ "--pos": (cutoff - 20) / (cutoffMax - 20) }}
-                            onChange={(e) => setCutoff(Number(e.target.value))}
+                            onChange={(e) => {
+                                const raw = Number(e.target.value);
+                                setCutoff(bandInfo.isBand ? clamp(raw, 20, cutoff2 - MIN_BAND_GAP_HZ) : raw);
+                            }}
                         />
                         <small>{bandInfo.isBand ? "The lower edge of the band." : "The frequency where the filter starts taking effect."}</small>
                     </div>
@@ -390,7 +403,7 @@ export default function FrequencyFiltering() {
                                 value={cutoff2}
                                 disabled={isProcessing}
                                 style={{ "--pos": (cutoff2 - 20) / (cutoffMax - 20) }}
-                                onChange={(e) => setCutoff2(Number(e.target.value))}
+                                onChange={(e) => setCutoff2(clamp(Number(e.target.value), cutoff + MIN_BAND_GAP_HZ, cutoffMax))}
                             />
                             <small>The upper edge of the band.</small>
                         </div>

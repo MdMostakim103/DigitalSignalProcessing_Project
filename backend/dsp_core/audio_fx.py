@@ -499,4 +499,17 @@ def apply_equalizer(
     return y_eq
 
 
+def signal_level_stats(y: np.ndarray) -> dict:
+    """Peak, RMS and dBFS for a signal — the same three numbers every level
+    meter in the app shows, factored out so the Studio chain can report them
+    per stage without duplicating the arithmetic."""
+    if y is None or y.size == 0:
+        return {"peak": 0.0, "rms": 0.0, "db": float("-inf")}
+
+    peak = float(np.max(np.abs(y)))
+    rms = float(np.sqrt(np.mean(y.astype(np.float64) ** 2)))
+    db = 20 * np.log10(max(rms, 1e-6))
+    return {"peak": peak, "rms": rms, "db": float(db)}
+
+
 

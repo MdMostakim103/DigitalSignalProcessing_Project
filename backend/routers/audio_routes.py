@@ -1,8 +1,11 @@
-from typing import Optional
+from typing import Optional, List
 import io
+import json
+import time
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pathlib import Path
+import numpy as np
 import librosa
 import soundfile as sf
 
@@ -12,17 +15,30 @@ from dsp_core.audio_fx import (
     apply_filter, compute_filter_frequency_response,
     apply_activity_gate,
     detect_dominant_frequency, freq_to_note, synthesize_tone,
-    apply_voice_morph,
+    apply_voice_morph, signal_level_stats,
 )
 from dsp_core.visualizer import (
     generate_comparison_plot, build_visualization_data, filter_response_bars,
     build_activity_data, build_pitch_data, build_morph_data, build_bird_data,
+    build_stage_data,
 )
 from dsp_core.bird_detector import classify_bird_sound
 
 router = APIRouter()
 
 STATIC_DIR = Path("static")
+
+# Operations the Studio chain builder is allowed to compose. Pitch Detection
+# is deliberately excluded: it doesn't transform the incoming signal, it
+# analyzes it for a dominant frequency and replaces it outright with a
+# synthesized tone, so it doesn't compose with the other steps the way an
+# effect does. Bird detection is a bonus-module classifier, not an effect.
+CHAINABLE_OPERATIONS = (
+    "amplify", "filter", "convolution", "echo", "delay",
+    "reverb", "equalizer", "noise", "activity", "morph",
+)
+
+MAX_CHAIN_STEPS = 25
 
 @router.post("/process-audio")
 async def process_audio(
@@ -130,6 +146,166 @@ async def process_audio(
         "activity": activity_data,
         "pitch": pitch_data,
         "morph": morph_data,
+    }
+
+
+def _run_chain_step(op_type: str, y: np.ndarray, sr: int, params: dict, ir_wave: Optional[np.ndarray]):
+    """Dispatch one chain step to the same dsp_core function the standalone
+    module page for that effect uses. Returns (y_out, extra) where extra
+    carries anything beyond the plain waveform (a filter's |H(f)| curve, an
+    impulse response's own waveform/spectrum) for that step's accordion."""
+    extra = {}
+
+    if op_type == "amplify":
+        y_out = amplify_volume(y, float(params.get("value", 4.0)))
+
+    elif op_type == "filter":
+        filter_family = params.get("filter_family", "butterworth")
+        band_type = params.get("band_type", "lowpass")
+        cutoff = float(params.get("cutoff", 1000.0))
+        cutoff2 = float(params.get("cutoff2", 4000.0))
+        order = int(params.get("order", 4))
+        y_out = apply_filter(y, sr, filter_family=filter_family, band_type=band_type, cutoff=cutoff, cutoff2=cutoff2, order=order)
+        resp_freqs, resp_mag = compute_filter_frequency_response(filter_family, band_type, sr, cutoff, cutoff2, order)
+        extra["filterResponse"] = filter_response_bars(resp_freqs, resp_mag, sr)
+
+    elif op_type == "convolution":
+        if ir_wave is None:
+            raise HTTPException(status_code=400, detail="Convolution step is missing its impulse response file.")
+        y_out = apply_convolution(y, ir_wave)
+        extra["impulseResponse"] = build_stage_data(ir_wave, sr)
+
+    elif op_type == "echo":
+        y_out = apply_echo(
+            y, sr,
+            delay_seconds=float(params.get("delay_ms", 280.0)) / 1000.0,
+            decay=float(params.get("decay", 0.55)),
+            repeats=int(params.get("repeats", 5)),
+        )
+
+    elif op_type == "delay":
+        y_out = apply_delay(
+            y, sr,
+            delay_seconds=float(params.get("delay_ms", 350.0)) / 1000.0,
+            wet=float(params.get("wet", 0.85)),
+        )
+
+    elif op_type == "reverb":
+        y_out = apply_reverb(y, sr)
+
+    elif op_type == "equalizer":
+        y_out = apply_equalizer(
+            y, sr,
+            float(params.get("low", 5.0)),
+            float(params.get("mid", 5.0)),
+            float(params.get("high", 5.0)),
+        )
+
+    elif op_type == "noise":
+        y_out = apply_noise_reduction(y, sr)
+
+    elif op_type == "activity":
+        y_out, energies, frame_times, active, threshold, peak = apply_activity_gate(
+            y, sr, threshold_ratio=float(params.get("threshold_ratio", 0.15)),
+        )
+        extra["activity"] = build_activity_data(energies, frame_times, active, threshold, peak)
+
+    elif op_type == "morph":
+        y_out, _ = apply_voice_morph(
+            y, sr,
+            morph_mode=params.get("morph_mode", "pitch"),
+            n_steps=float(params.get("n_steps", 4.0)),
+            rate=float(params.get("rate", 1.5)),
+        )
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown or non-chainable operation: {op_type}")
+
+    return y_out, extra
+
+
+@router.post("/process-chain")
+async def process_chain(
+    file: UploadFile = File(...),
+    chain: str = Form(...),
+    ir_files: List[UploadFile] = File(default=[]),
+):
+    """Apply an ordered list of effects to one uploaded file, each step's
+    output feeding the next — the Studio's multi-operation chain. `chain` is
+    a JSON string: [{"type": "filter", "params": {...}}, ...]. Convolution
+    steps consume impulse-response files from `ir_files` in the order those
+    steps appear in the chain (a chain with two convolution steps needs two
+    files there, in order).
+    """
+    try:
+        steps = json.loads(chain)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="`chain` must be valid JSON.")
+
+    if not isinstance(steps, list) or not steps:
+        raise HTTPException(status_code=400, detail="`chain` must be a non-empty list of steps.")
+    if len(steps) > MAX_CHAIN_STEPS:
+        raise HTTPException(status_code=400, detail=f"A chain can have at most {MAX_CHAIN_STEPS} steps.")
+
+    for step in steps:
+        if not isinstance(step, dict) or step.get("type") not in CHAINABLE_OPERATIONS:
+            raise HTTPException(status_code=400, detail=f"Invalid or non-chainable step: {step}")
+
+    input_path = Path("static/uploads") / file.filename
+    with open(input_path, "wb") as f:
+        f.write(await file.read())
+
+    y, sr = librosa.load(input_path, sr=None)
+
+    ir_cursor = 0
+    y_current = y
+    stage_results = []
+
+    for index, step in enumerate(steps):
+        op_type = step["type"]
+        params = step.get("params", {})
+
+        ir_wave = None
+        if op_type == "convolution":
+            if ir_cursor >= len(ir_files):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Step {index + 1} is a convolution step but no matching impulse response file was uploaded.",
+                )
+            ir_upload = ir_files[ir_cursor]
+            ir_cursor += 1
+            ir_path = Path("static/uploads") / f"chain_ir_{index}_{ir_upload.filename}"
+            with open(ir_path, "wb") as f:
+                f.write(await ir_upload.read())
+            ir_wave, _ = librosa.load(ir_path, sr=sr)
+
+        start = time.perf_counter()
+        y_current, extra = _run_chain_step(op_type, y_current, sr, params, ir_wave)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+        stage_results.append({
+            "index": index,
+            "type": op_type,
+            "params": params,
+            "elapsed_ms": round(elapsed_ms, 2),
+            **build_stage_data(y_current, sr),
+            **extra,
+        })
+
+    output_filename = f"chain_{'-'.join(s['type'] for s in steps)}_{file.filename}"
+    output_path = Path("static/processed") / output_filename
+    sf.write(output_path, y_current, sr)
+
+    return {
+        "status": f"Chain of {len(steps)} operation(s) processed successfully!",
+        "filename": file.filename,
+        "input": build_stage_data(y, sr),
+        "stages": stage_results,
+        "output": {
+            "audio_url": f"http://127.0.0.1:8000/static/processed/{output_filename}",
+            "stats": signal_level_stats(y_current),
+            **build_stage_data(y_current, sr),
+        },
     }
 
 

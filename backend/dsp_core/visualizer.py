@@ -301,6 +301,17 @@ def filter_response_bars(freqs: np.ndarray, magnitude: np.ndarray, sr: int, bins
     return _bin_magnitude(np.asarray(freqs), np.asarray(magnitude), max_frequency, bins)
 
 
+def build_stage_data(y: np.ndarray, sr: int) -> dict:
+    """Waveform + spectrum for a single signal — the per-step payload used by
+    the Studio chain (one stage's 'after' picture), reusing the exact same
+    downsampling/binning as every other module so a chain step's graph reads
+    identically to that same operation's standalone page."""
+    return {
+        "waveform": _downsample_time(y),
+        "spectrum": _spectrum(y, sr),
+    }
+
+
 def build_bird_data(y: np.ndarray, sr: int, detection: dict) -> dict:
     """Time waveform + spectrum bars for the recorded clip, reusing the
     same _downsample_time/_spectrum building blocks every other module

@@ -66,6 +66,30 @@ export async function detectBirdSound(blob) {
     return await response.json();
 }
 
+// Runs an ordered list of effects on one file, each step feeding the next —
+// the Studio's chain builder. `chain` is [{ type, params }, ...]; `irFiles`
+// is the impulse-response File for each convolution step, in the order
+// those steps appear in `chain` (the backend consumes them in that order).
+export async function processChain(file, chain, irFiles = []) {
+    const formData = new FormData();
+
+    formData.append("file", file);
+    formData.append("chain", JSON.stringify(chain));
+    irFiles.forEach((irFile) => formData.append("ir_files", irFile));
+
+    const response = await fetch(`${API_BASE_URL}/process-chain`, {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        const message = await response.text().catch(() => "");
+        throw new Error(message || "Chain processing failed");
+    }
+
+    return await response.json();
+}
+
 // Fetches just the filter's own |H(f)| curve — no audio file needed — so a
 // live preview graph can update as the user drags cutoff/order sliders.
 export async function getFilterResponse({ filterFamily, bandType, cutoff, cutoff2, order, sampleRate }) {

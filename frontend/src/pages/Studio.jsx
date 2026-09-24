@@ -1,1414 +1,581 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./../styles/studio.css";
+import { processChain, getFilterResponse } from "../services/api";
 
-const MODULE_DEFAULTS = {
-    amplification: { enabled: true, value: 6 },
-    filtering: { enabled: false, value: 55 },
-    echo: { enabled: true, value: 35 },
-    gate: { enabled: false, value: 25 },
-    pitch: { enabled: false, value: 0 },
-    morph: { enabled: false, value: 15 }
-};
+const FILTER_FAMILIES = [
+    { value: "butterworth", label: "Butterworth" },
+    { value: "chebyshev1", label: "Chebyshev I" },
+    { value: "chebyshev2", label: "Chebyshev II" },
+    { value: "elliptic", label: "Elliptic" },
+    { value: "bessel", label: "Bessel" },
+    { value: "ideal", label: "Ideal (brick-wall)" },
+];
 
-const MODULE_META = {
-    amplification: {
-        name: "Amplification",
-        short: "GAIN",
-        min: 0,
-        max: 20,
-        step: 1,
-        unit: "dB"
+const BAND_TYPES = [
+    { value: "lowpass", label: "Low-pass" },
+    { value: "highpass", label: "High-pass" },
+    { value: "bandpass", label: "Band-pass" },
+    { value: "bandstop", label: "Band-stop" },
+];
+
+const MORPH_MODES = [
+    { value: "pitch", label: "Pitch Shift" },
+    { value: "stretch", label: "Time Stretch" },
+    { value: "robot", label: "Robot (zero phase)" },
+    { value: "whisper", label: "Whisper (random phase)" },
+];
+
+// One entry per chainable backend operation. `defaultParams` mirrors exactly
+// what /process-chain expects for that step type, so building the request
+// payload is just `{ type, params }` with no translation layer.
+const OPERATIONS = [
+    { type: "amplify", label: "Amplify", short: "GAIN", defaultParams: { value: 2 } },
+    {
+        type: "filter", label: "Filter", short: "FILTER",
+        defaultParams: { filter_family: "butterworth", band_type: "lowpass", cutoff: 1000, cutoff2: 4000, order: 4 },
     },
-    filtering: {
-        name: "Filtering",
-        short: "LOW-PASS",
-        min: 0,
-        max: 100,
-        step: 1,
-        unit: "%"
+    { type: "convolution", label: "Convolution", short: "CONV", defaultParams: {}, requiresIr: true },
+    { type: "echo", label: "Echo", short: "ECHO", defaultParams: { delay_ms: 280, decay: 0.55, repeats: 5 } },
+    { type: "delay", label: "Delay", short: "DELAY", defaultParams: { delay_ms: 350, wet: 0.85 } },
+    { type: "reverb", label: "Reverb", short: "REVERB", defaultParams: {} },
+    { type: "equalizer", label: "Equalizer", short: "EQ", defaultParams: { low: 5, mid: 5, high: 5 } },
+    { type: "noise", label: "Noise Reduction", short: "DENOISE", defaultParams: {} },
+    { type: "activity", label: "Activity Gate", short: "GATE", defaultParams: { threshold_ratio: 0.15 } },
+    {
+        type: "morph", label: "Voice Morph", short: "MORPH",
+        defaultParams: { morph_mode: "pitch", n_steps: 4, rate: 1.5 },
     },
-    echo: {
-        name: "Echo",
-        short: "MIX",
-        min: 0,
-        max: 100,
-        step: 1,
-        unit: "%"
-    },
-    gate: {
-        name: "Speech Gate",
-        short: "THRESHOLD",
-        min: 0,
-        max: 100,
-        step: 1,
-        unit: "%"
-    },
-    pitch: {
-        name: "Pitch Shift",
-        short: "SEMITONES",
-        min: -12,
-        max: 12,
-        step: 1,
-        unit: "st"
-    },
-    morph: {
-        name: "Voice Morph",
-        short: "CHARACTER",
-        min: 0,
-        max: 100,
-        step: 1,
-        unit: "%"
-    }
-};
+];
+
+const OPERATION_BY_TYPE = Object.fromEntries(OPERATIONS.map((op) => [op.type, op]));
+
+const HISTORY_KEY = "dsp-studio-chain-history";
+const MAX_HISTORY = 5;
+const MAX_CHAIN_STEPS = 10;
+
+// A band (bandpass/bandstop) always needs its low edge strictly below its
+// high edge — scipy's filter design rejects a degenerate/inverted band, so
+// the two cutoff sliders are clamped against each other.
+const MIN_BAND_GAP_HZ = 10;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-const formatTime = (seconds) => {
-    if (!Number.isFinite(seconds)) return "00:00";
-    const safe = Math.max(0, seconds);
-    const minutes = Math.floor(safe / 60);
-    const secs = Math.floor(safe % 60);
-    return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-};
+const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-const copyModules = () =>
-    Object.fromEntries(
-        Object.entries(MODULE_DEFAULTS).map(([key, value]) => [
-            key,
-            { ...value }
-        ])
-    );
+function formatDb(factor) {
+    const db = 20 * Math.log10(Math.max(factor, 0.0001));
+    return `${db >= 0 ? "+" : "−"}${Math.abs(db).toFixed(1)} dB`;
+}
 
-function makeDisplayWaveform(samples, targetPoints = 180) {
-    if (!samples?.length) return [];
+function loadHistory() {
+    try {
+        const raw = window.localStorage.getItem(HISTORY_KEY);
+        return raw ? JSON.parse(raw) : [];
+    } catch {
+        return [];
+    }
+}
 
-    // VISUALIZATION ONLY.
-    // The real y[n] array is never replaced. We deliberately reduce the
-    // display to a small number of representative points and then smooth
-    // those points so the canvas reads like a continuous signal/function
-    // instead of a dense collection of spikes.
-    const count = Math.min(targetPoints, samples.length);
-    const stride = samples.length / count;
-    const points = new Float32Array(count);
+function saveHistory(history) {
+    try {
+        window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch {
+        // Storage full or unavailable — history just won't persist across reloads.
+    }
+}
 
-    for (let i = 0; i < count; i += 1) {
-        const start = Math.floor(i * stride);
-        const end = Math.max(
-            start + 1,
-            Math.min(samples.length, Math.floor((i + 1) * stride))
-        );
-
-        let sum = 0;
-        let weight = 0;
-
-        // Use a small weighted low-pass average instead of taking the
-        // strongest sample. Taking the peak is what created the vertical
-        // spike / zig-zag appearance in the previous visualization.
-        for (let j = start; j < end; j += 1) {
-            const distance = Math.abs(
-                j - (start + end - 1) / 2
-            );
-            const span = Math.max(1, (end - start) / 2);
-            const w = 1 - Math.min(0.9, distance / span) * 0.45;
-            sum += samples[j] * w;
-            weight += w;
+function describeStep(type, params) {
+    switch (type) {
+        case "amplify":
+            return `Amplify · x${Number(params.value).toFixed(2)} (${formatDb(params.value)})`;
+        case "filter": {
+            const family = FILTER_FAMILIES.find((f) => f.value === params.filter_family)?.label || params.filter_family;
+            const band = BAND_TYPES.find((b) => b.value === params.band_type)?.label || params.band_type;
+            const isBand = params.band_type === "bandpass" || params.band_type === "bandstop";
+            const range = isBand ? `${Math.round(params.cutoff)}–${Math.round(params.cutoff2)} Hz` : `${Math.round(params.cutoff)} Hz`;
+            const order = params.filter_family === "ideal" ? "" : ` · order ${params.order}`;
+            return `Filter · ${family} ${band} @ ${range}${order}`;
         }
-
-        points[i] = weight > 0 ? sum / weight : 0;
-    }
-
-    // Smooth the reduced points with a Gaussian-like moving window.
-    // This is strictly a display operation and does not alter audio.
-    const smoothed = new Float32Array(count);
-    const radius = Math.max(2, Math.floor(count / 28));
-
-    for (let i = 0; i < count; i += 1) {
-        let sum = 0;
-        let weight = 0;
-
-        for (
-            let j = Math.max(0, i - radius);
-            j <= Math.min(count - 1, i + radius);
-            j += 1
-        ) {
-            const distance = Math.abs(i - j);
-            const sigma = Math.max(1, radius * 0.55);
-            const w = Math.exp(
-                -(distance * distance) /
-                    (2 * sigma * sigma)
-            );
-
-            sum += points[j] * w;
-            weight += w;
+        case "convolution":
+            return `Convolution · IR: ${params.irFileName || "not set"}`;
+        case "echo":
+            return `Echo · ${Math.round(params.delay_ms)}ms delay · decay ${params.decay.toFixed(2)} · ×${params.repeats}`;
+        case "delay":
+            return `Delay · ${Math.round(params.delay_ms)}ms · wet ${Math.round(params.wet * 100)}%`;
+        case "reverb":
+            return "Reverb · fixed room impulse response";
+        case "equalizer":
+            return `Equalizer · low ${params.low} · mid ${params.mid} · high ${params.high}`;
+        case "noise":
+            return "Noise Reduction · spectral gate";
+        case "activity":
+            return `Activity Gate · threshold ${Math.round(params.threshold_ratio * 100)}%`;
+        case "morph": {
+            const mode = MORPH_MODES.find((m) => m.value === params.morph_mode)?.label || params.morph_mode;
+            const extra = params.morph_mode === "pitch" ? ` · ${params.n_steps > 0 ? "+" : ""}${params.n_steps} st`
+                : params.morph_mode === "stretch" ? ` · ×${params.rate}` : "";
+            return `Voice Morph · ${mode}${extra}`;
         }
-
-        smoothed[i] = weight > 0 ? sum / weight : 0;
+        default:
+            return type;
     }
+}
 
-    let peak = 0;
-
-    for (let i = 0; i < smoothed.length; i += 1) {
-        peak = Math.max(peak, Math.abs(smoothed[i]));
-    }
-
-    if (peak < 0.000001) return Array(count).fill(0);
-
-    // Keep the visible signal comfortably inside the graph. This only
-    // changes visualization coordinates; the actual audio remains intact.
-    const targetPeak = 0.78;
-
-    return Array.from(smoothed, (value) =>
-        clamp((value / peak) * targetPeak, -0.92, 0.92)
+function NumberField({ label, value, min, max, step, unit = "", format, onChange, disabled }) {
+    return (
+        <label className="chain-field">
+            <span>{label}</span>
+            <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={value}
+                disabled={disabled}
+                onChange={(event) => onChange(Number(event.target.value))}
+            />
+            <output>{format ? format(value) : `${value}${unit}`}</output>
+        </label>
     );
 }
 
-function calculateSpectrum(samples, bins = 96) {
-    if (!samples?.length) return [];
-
-    const frameSize = Math.min(2048, samples.length);
-    const start = Math.max(0, Math.floor((samples.length - frameSize) / 2));
-    const step = Math.max(1, Math.floor(frameSize / 512));
-
-    const frame = new Float32Array(frameSize);
-
-    for (let i = 0; i < frameSize; i += 1) {
-        const index = start + i;
-        const window =
-            0.5 -
-            0.5 *
-                Math.cos((2 * Math.PI * i) / Math.max(1, frameSize - 1));
-
-        frame[i] = (samples[index] || 0) * window;
-    }
-
-    const result = [];
-
-    for (let k = 0; k < bins; k += 1) {
-        const bin = Math.floor((k / bins) * (frameSize / 2));
-
-        let real = 0;
-        let imag = 0;
-
-        for (let n = 0; n < frameSize; n += step) {
-            const angle = (2 * Math.PI * bin * n) / frameSize;
-            real += frame[n] * Math.cos(angle);
-            imag -= frame[n] * Math.sin(angle);
-        }
-
-        const magnitude =
-            Math.sqrt(real * real + imag * imag) /
-            Math.max(1, frameSize / step);
-
-        result.push({
-            frequency: bin,
-            magnitude
-        });
-    }
-
-    const max = Math.max(...result.map((point) => point.magnitude), 0.000001);
-
-    return result.map((point) => ({
-        ...point,
-        normalized: clamp(point.magnitude / max, 0, 1)
-    }));
-}
-
-function applyPitchPreview(samples, semitones) {
-    if (!samples?.length || semitones === 0) return new Float32Array(samples);
-
-    const ratio = Math.pow(2, semitones / 12);
-    const output = new Float32Array(samples.length);
-
-    for (let i = 0; i < output.length; i += 1) {
-        const sourcePosition = i * ratio;
-        const wrapped = sourcePosition % samples.length;
-        const left = Math.floor(wrapped);
-        const right = (left + 1) % samples.length;
-        const fraction = wrapped - left;
-
-        output[i] =
-            samples[left] * (1 - fraction) + samples[right] * fraction;
-    }
-
-    return output;
-}
-
-function processChannel(samples, sampleRate, modules) {
-    let working = new Float32Array(samples);
-
-    if (modules.pitch.enabled && modules.pitch.value !== 0) {
-        working = applyPitchPreview(working, modules.pitch.value);
-    }
-
-    const gain = modules.amplification.enabled
-        ? Math.pow(10, modules.amplification.value / 20)
-        : 1;
-
-    const filterAmount = modules.filtering.enabled
-        ? modules.filtering.value / 100
-        : 0;
-
-    const echoAmount = modules.echo.enabled ? modules.echo.value / 100 : 0;
-
-    const gateAmount = modules.gate.enabled ? modules.gate.value / 100 : 0;
-
-    const morphAmount = modules.morph.enabled ? modules.morph.value / 100 : 0;
-
-    const output = new Float32Array(working.length);
-
-    const cutoff = 18000 - filterAmount * 15500;
-    const alpha = clamp(
-        (2 * Math.PI * cutoff) /
-            (2 * Math.PI * cutoff + Math.max(1, sampleRate)),
-        0.015,
-        0.95
+function SelectField({ label, value, options, onChange, disabled }) {
+    return (
+        <label className="chain-field chain-field--select">
+            <span>{label}</span>
+            <select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+                {options.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+            </select>
+        </label>
     );
+}
 
-    let lowPassState = 0;
+// A small always-visible sparkline of |H(f)| for the filter step currently
+// configured — lets the user see the shape of the filter they're about to
+// apply while still arranging the chain, before anything has run.
+function FilterMiniPreview({ params, sampleRate }) {
+    const [curve, setCurve] = useState(null);
 
-    const echoDelay = Math.max(1, Math.floor(sampleRate * 0.18));
-    const echoBuffer = new Float32Array(echoDelay);
-
-    let echoIndex = 0;
-
-    for (let i = 0; i < working.length; i += 1) {
-        let value = working[i] * gain;
-
-        if (filterAmount > 0) {
-            lowPassState += alpha * (value - lowPassState);
-            value = lowPassState;
-        }
-
-        if (gateAmount > 0) {
-            const threshold = 0.015 + gateAmount * 0.25;
-            if (Math.abs(value) < threshold) {
-                value *= 1 - gateAmount;
+    useEffect(() => {
+        let cancelled = false;
+        const timer = window.setTimeout(async () => {
+            try {
+                const data = await getFilterResponse({
+                    filterFamily: params.filter_family,
+                    bandType: params.band_type,
+                    cutoff: params.cutoff,
+                    cutoff2: params.cutoff2,
+                    order: params.order,
+                    sampleRate: sampleRate || 44100,
+                });
+                if (!cancelled) setCurve(data);
+            } catch {
+                if (!cancelled) setCurve(null);
             }
-        }
+        }, 200);
 
-        if (echoAmount > 0) {
-            const delayed = echoBuffer[echoIndex];
-            echoBuffer[echoIndex] = value;
-            value = value * (1 - echoAmount * 0.45) + delayed * echoAmount * 0.45;
-            echoIndex = (echoIndex + 1) % echoDelay;
-        }
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [params.filter_family, params.band_type, params.cutoff, params.cutoff2, params.order, sampleRate]);
 
-        if (morphAmount > 0) {
-            const harmonic = Math.tanh(value * (1 + morphAmount * 4));
-            value = value * (1 - morphAmount * 0.35) + harmonic * morphAmount * 0.35;
-        }
+    const path = useMemo(() => {
+        if (!curve?.magnitude?.length) return "";
+        const max = Math.max(...curve.magnitude, 1e-9);
+        const w = 160;
+        const h = 34;
+        return curve.magnitude
+            .map((m, i) => {
+                const x = (i / (curve.magnitude.length - 1)) * w;
+                const y = h - clamp(m / max, 0, 1) * (h - 4) - 2;
+                return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+            })
+            .join(" ");
+    }, [curve]);
 
-        output[i] = value;
-    }
-
-    return output;
-}
-
-function processAudioBuffer(buffer, modules) {
-    const channels = [];
-
-    let clippedSamples = 0;
-    let peak = 0;
-
-    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-        const input = buffer.getChannelData(channel);
-        const processed = processChannel(input, buffer.sampleRate, modules);
-
-        for (let i = 0; i < processed.length; i += 1) {
-            const absolute = Math.abs(processed[i]);
-            peak = Math.max(peak, absolute);
-
-            if (absolute > 1) {
-                clippedSamples += 1;
-                processed[i] = clamp(processed[i], -1, 1);
-            }
-        }
-
-        channels.push(processed);
-    }
-
-    const context = new AudioContext();
-    const output = context.createBuffer(
-        buffer.numberOfChannels,
-        buffer.length,
-        buffer.sampleRate
+    return (
+        <div className="filter-mini-preview">
+            <span>|H(f)| preview</span>
+            <svg viewBox="0 0 160 34" preserveAspectRatio="none">
+                {path && <path d={path} fill="none" stroke="var(--input-accent)" strokeWidth="1.6" />}
+            </svg>
+        </div>
     );
-
-    channels.forEach((channel, index) => {
-        output.copyToChannel(channel, index);
-    });
-
-    context.close();
-
-    return {
-        buffer: output,
-        clippedSamples,
-        peak
-    };
 }
 
-function levelStats(samples) {
-    if (!samples?.length) {
-        return { peak: 0, rms: 0, db: -Infinity };
-    }
-
-    let peak = 0;
-    let sum = 0;
-
-    for (let i = 0; i < samples.length; i += 1) {
-        const value = samples[i];
-        peak = Math.max(peak, Math.abs(value));
-        sum += value * value;
-    }
-
-    const rms = Math.sqrt(sum / samples.length);
-
-    return {
-        peak,
-        rms,
-        db: 20 * Math.log10(Math.max(rms, 0.000001))
-    };
-}
-
-function GraphCanvas({
-    title,
-    subtitle,
-    badge,
-    data,
-    type,
-    color,
-    cursorProgress,
-    zoom,
-    viewCenter,
-    onZoomChange,
-    onCenterChange,
-    onOpen,
-    playMode,
-    playActive,
-    onPlay,
-    duration = 1,
-    compact = false
-}) {
+// Static time or frequency graph — no scanning cursor, no zoom, no
+// animation. Draws once from whatever data it's given and redraws on
+// resize only.
+function StaticGraph({ title, type, data, color = "var(--input-accent)", height = 150 }) {
     const canvasRef = useRef(null);
-    const [hover, setHover] = useState(null);
 
     const draw = useCallback(() => {
         const canvas = canvasRef.current;
-        if (!canvas || !data?.length) return;
+        if (!canvas) return;
 
         const rect = canvas.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
         const width = Math.max(1, Math.floor(rect.width));
-        const height = Math.max(1, Math.floor(rect.height));
-
+        const h = Math.max(1, Math.floor(rect.height));
         canvas.width = width * dpr;
-        canvas.height = height * dpr;
+        canvas.height = h * dpr;
 
         const ctx = canvas.getContext("2d");
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, h);
+        ctx.fillStyle = "rgba(255,255,255,0.035)";
+        ctx.fillRect(0, 0, width, h);
 
-        const background =
-            getComputedStyle(canvas).getPropertyValue("--graph-canvas").trim() ||
-            "#5557ae";
+        const left = 10;
+        const right = width - 10;
+        const top = 10;
+        const bottom = h - 10;
+        const gw = right - left;
+        const gh = bottom - top;
 
-        ctx.clearRect(0, 0, width, height);
-        ctx.fillStyle = background;
-        ctx.fillRect(0, 0, width, height);
-
-        const left = compact ? 34 : 42;
-        const right = width - 18;
-        const top = 18;
-        const bottom = height - 30;
-        const graphWidth = right - left;
-        const graphHeight = bottom - top;
-
-        ctx.strokeStyle = "rgba(255,255,255,0.10)";
-        ctx.lineWidth = 1;
-
-        for (let i = 0; i <= 4; i += 1) {
-            const y = top + (graphHeight * i) / 4;
-            ctx.beginPath();
-            ctx.moveTo(left, y);
-            ctx.lineTo(right, y);
-            ctx.stroke();
-        }
-
-        for (let i = 0; i <= 5; i += 1) {
-            const x = left + (graphWidth * i) / 5;
-            ctx.beginPath();
-            ctx.moveTo(x, top);
-            ctx.lineTo(x, bottom);
-            ctx.stroke();
-        }
-
-        ctx.strokeStyle = "rgba(255,255,255,0.26)";
+        ctx.strokeStyle = "rgba(255,255,255,0.12)";
         ctx.beginPath();
-        ctx.moveTo(left, top + graphHeight / 2);
-        ctx.lineTo(right, top + graphHeight / 2);
+        ctx.moveTo(left, top + gh / 2);
+        ctx.lineTo(right, top + gh / 2);
         ctx.stroke();
 
-        ctx.fillStyle = "rgba(255,255,255,0.54)";
-        ctx.font = `${compact ? 9 : 10}px Inter, system-ui, sans-serif`;
-
         if (type === "time") {
-            ctx.fillText("+1", 8, top + 4);
-            ctx.fillText("0", 12, top + graphHeight / 2 + 3);
-            ctx.fillText("-1", 8, bottom);
+            const values = data || [];
+            if (!values.length) return;
 
-            const visibleCount = Math.max(
-                2,
-                Math.floor(data.length / Math.max(1, zoom))
-            );
-
-            const centerIndex = Math.floor(viewCenter * data.length);
-            const start = clamp(
-                centerIndex - Math.floor(visibleCount / 2),
-                0,
-                Math.max(0, data.length - visibleCount)
-            );
-            const end = Math.min(data.length, start + visibleCount);
-
-            let visiblePeak = 0;
-
-            for (let i = start; i < end; i += 1) {
-                visiblePeak = Math.max(visiblePeak, Math.abs(data[i]));
-            }
-
-            // Keep at least ~60% of the graph useful vertically, while
-            // preserving the waveform shape.
-            const yScale = Math.max(0.60, Math.min(0.94, visiblePeak));
-
-            // Draw a smooth cubic curve through the sparse display points.
-            // The dense audio samples are never used as the visible trace.
-            const visiblePoints = [];
-
-            for (let i = start; i < end; i += 1) {
-                const ratio =
-                    (i - start) / Math.max(1, end - start - 1);
-                const x = left + graphWidth * ratio;
-                const y =
-                    top +
-                    graphHeight / 2 -
-                    (data[i] / yScale) * (graphHeight * 0.42);
-
-                visiblePoints.push({ x, y });
-            }
+            let peak = 0;
+            for (let i = 0; i < values.length; i += 1) peak = Math.max(peak, Math.abs(values[i]));
+            const scale = peak > 0 ? peak : 1;
 
             ctx.beginPath();
-
-            if (visiblePoints.length > 0) {
-                ctx.moveTo(
-                    visiblePoints[0].x,
-                    visiblePoints[0].y
-                );
-
-                for (let i = 0; i < visiblePoints.length - 1; i += 1) {
-                    const current = visiblePoints[i];
-                    const next = visiblePoints[i + 1];
-                    const previous =
-                        visiblePoints[Math.max(0, i - 1)];
-                    const following =
-                        visiblePoints[
-                            Math.min(
-                                visiblePoints.length - 1,
-                                i + 2
-                            )
-                        ];
-
-                    const tension = 0.16;
-                    const cp1x =
-                        current.x +
-                        (next.x - previous.x) * tension;
-                    const cp1y =
-                        current.y +
-                        (next.y - previous.y) * tension;
-                    const cp2x =
-                        next.x -
-                        (following.x - current.x) * tension;
-                    const cp2y =
-                        next.y -
-                        (following.y - current.y) * tension;
-
-                    ctx.bezierCurveTo(
-                        cp1x,
-                        cp1y,
-                        cp2x,
-                        cp2y,
-                        next.x,
-                        next.y
-                    );
-                }
-            }
-
+            values.forEach((v, i) => {
+                const x = left + (i / Math.max(1, values.length - 1)) * gw;
+                const y = top + gh / 2 - (v / scale) * (gh / 2) * 0.92;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
             ctx.strokeStyle = color;
-            ctx.lineWidth = compact ? 3 : 2.4;
+            ctx.lineWidth = 1.8;
             ctx.lineJoin = "round";
-            ctx.lineCap = "round";
             ctx.stroke();
-
-            for (let i = 0; i <= 5; i += 1) {
-                const ratio = i / 5;
-                const x = left + graphWidth * ratio;
-                const timeRatio = clamp(
-                    viewCenter - 0.5 / zoom + ratio / zoom,
-                    0,
-                    1
-                );
-                const seconds = timeRatio * duration;
-
-                ctx.fillText(
-                    `${seconds.toFixed(1)}s`,
-                    x - 12,
-                    height - 10
-                );
-            }
-
-            const cursor = clamp(cursorProgress, 0, 1);
-
-            if (
-                cursor >=
-                    viewCenter - 0.5 / zoom &&
-                cursor <=
-                    viewCenter + 0.5 / zoom
-            ) {
-                const ratio =
-                    (cursor - (viewCenter - 0.5 / zoom)) * zoom;
-                const x = left + graphWidth * clamp(ratio, 0, 1);
-
-                const cursorIndex = clamp(
-                    Math.floor(cursor * (data.length - 1)),
-                    0,
-                    data.length - 1
-                );
-
-                const cursorY =
-                    top +
-                    graphHeight / 2 -
-                    (data[cursorIndex] / yScale) *
-                        (graphHeight * 0.42);
-
-                ctx.strokeStyle = "rgba(255,255,255,0.30)";
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.moveTo(x, top);
-                ctx.lineTo(x, bottom);
-                ctx.stroke();
-
-                ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(x, cursorY, compact ? 7 : 6, 0, Math.PI * 2);
-                ctx.fill();
-
-                ctx.strokeStyle = "#ffffff";
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.arc(x, cursorY, compact ? 7 : 6, 0, Math.PI * 2);
-                ctx.stroke();
-            }
         } else {
-            ctx.fillText("MAG", 8, top + 4);
-            ctx.fillText("0", 18, bottom);
+            const magnitude = data?.magnitude || [];
+            if (!magnitude.length) return;
 
-            const visibleBins = Math.max(
-                4,
-                Math.floor(data.length / Math.max(1, zoom))
-            );
+            const displayMax = data.displayMax || Math.max(...magnitude, 1e-9);
+            const barWidth = gw / magnitude.length;
 
-            const centerIndex = Math.floor(viewCenter * data.length);
-            const start = clamp(
-                centerIndex - Math.floor(visibleBins / 2),
-                0,
-                Math.max(0, data.length - visibleBins)
-            );
-            const end = Math.min(data.length, start + visibleBins);
-
-            let visibleMax = 0;
-
-            for (let i = start; i < end; i += 1) {
-                visibleMax = Math.max(
-                    visibleMax,
-                    data[i]?.normalized || 0
-                );
-            }
-
-            const yScale = Math.max(0.60, visibleMax);
-            const spacing =
-                graphWidth / Math.max(1, end - start);
-
-            for (let i = start; i < end; i += 1) {
-                const ratio =
-                    (i - start) /
-                    Math.max(1, end - start - 1);
-                const x = left + graphWidth * ratio;
-                const magnitude = clamp(
-                    (data[i].normalized || 0) / yScale,
-                    0,
-                    1
-                );
-                const y =
-                    bottom -
-                    magnitude * graphHeight * 0.82;
-
-                ctx.strokeStyle = color;
-                ctx.globalAlpha = 0.30 + magnitude * 0.70;
-                ctx.lineWidth = Math.max(
-                    1,
-                    Math.min(3, spacing * 0.55)
-                );
-                ctx.beginPath();
-                ctx.moveTo(x, bottom);
-                ctx.lineTo(x, y);
-                ctx.stroke();
-
-                ctx.globalAlpha = 1;
+            magnitude.forEach((m, i) => {
+                const ratio = clamp(m / (displayMax || 1), 0, 1);
+                const barHeight = ratio * gh;
+                const x = left + i * barWidth;
+                ctx.globalAlpha = 0.35 + ratio * 0.65;
                 ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(
-                    x,
-                    y,
-                    magnitude > 0.07 ? 3.2 : 2.1,
-                    0,
-                    Math.PI * 2
-                );
-                ctx.fill();
-            }
-
-            ctx.fillStyle = "rgba(255,255,255,0.50)";
-            ctx.fillText("0 Hz", left, height - 10);
-            ctx.fillText("Nyquist", right - 44, height - 10);
-
-            // Frequency is not a time axis, so the moving playback cursor
-            // is intentionally not drawn here. Instead, highlight the
-            // strongest visible spectral component.
-            let peakIndex = start;
-            let peakValue = 0;
-
-            for (let i = start; i < end; i += 1) {
-                const value = data[i]?.normalized || 0;
-                if (value > peakValue) {
-                    peakValue = value;
-                    peakIndex = i;
-                }
-            }
-
-            if (peakIndex >= start && peakIndex < end) {
-                const ratio =
-                    (peakIndex - start) /
-                    Math.max(1, end - start - 1);
-                const x = left + graphWidth * ratio;
-                const y =
-                    bottom -
-                    clamp(
-                        (data[peakIndex].normalized || 0) / yScale,
-                        0,
-                        1
-                    ) *
-                        graphHeight *
-                        0.82;
-
-                ctx.strokeStyle = "rgba(255,255,255,0.24)";
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.moveTo(x, top);
-                ctx.lineTo(x, bottom);
-                ctx.stroke();
-
-                ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(x, y, compact ? 7 : 6, 0, Math.PI * 2);
-                ctx.fill();
-
-                ctx.strokeStyle = "#ffffff";
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.arc(x, y, compact ? 7 : 6, 0, Math.PI * 2);
-                ctx.stroke();
-            }
+                ctx.fillRect(x, bottom - barHeight, Math.max(1, barWidth - 1), barHeight);
+            });
+            ctx.globalAlpha = 1;
         }
-    }, [
-        data,
-        type,
-        color,
-        cursorProgress,
-        zoom,
-        viewCenter,
-        duration,
-        compact
-    ]);
+    }, [data, type, color]);
 
     useEffect(() => {
         draw();
-
-        const handleResize = () => draw();
-        window.addEventListener("resize", handleResize);
-
-        return () => window.removeEventListener("resize", handleResize);
+        const onResize = () => draw();
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
     }, [draw]);
 
-    const handleWheel = (event) => {
-        // Zoom is intentionally available only in the enlarged analysis view.
-        // On the 2×2 overview grid, normal page scrolling should remain normal.
-        if (!compact) return;
-
-        event.preventDefault();
-        event.stopPropagation();
-
-        const next = clamp(
-            zoom + (event.deltaY < 0 ? 0.5 : -0.5),
-            1,
-            16
-        );
-
-        onZoomChange(next);
-    };
-
-    const handleMouseMove = (event) => {
-        const canvas = canvasRef.current;
-        if (!canvas || !data?.length) return;
-
-        const rect = canvas.getBoundingClientRect();
-        const ratio = clamp(
-            (event.clientX - rect.left) / rect.width,
-            0,
-            1
-        );
-
-        if (type === "spectrum") {
-            const index = clamp(
-                Math.floor(ratio * data.length),
-                0,
-                data.length - 1
-            );
-
-            const point = data[index];
-
-            if (point) {
-                setHover({
-                    x: event.clientX - rect.left,
-                    y: event.clientY - rect.top,
-                    text: `${point.frequency.toFixed(0)} Hz · ${(point.normalized * 100).toFixed(1)}%`
-                });
-            }
-        }
-    };
-
-    const handleMouseLeave = () => setHover(null);
-
-    const handleDoubleClick = () => {
-        onZoomChange(1);
-        onCenterChange(0.5);
-    };
-
     return (
-        <article
-            className={`graph-card ${compact ? "graph-card--expanded" : ""}`}
-            onClick={(event) => {
-                if (!onOpen) return;
-                if (
-                    event.target.closest("button") ||
-                    event.target.closest("input")
-                ) {
-                    return;
-                }
-                onOpen();
-            }}
-            style={onOpen ? { cursor: "zoom-in" } : undefined}
-        >
-            <div className="graph-card__header">
-                <div>
-                    <div className="graph-card__title-row">
-                        <span
-                            className="signal-dot"
-                            style={{ background: color }}
-                        />
-                        <h3>{title}</h3>
-                    </div>
-                    <p>{subtitle}</p>
-                </div>
-
-                <div
-                    style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 7
-                    }}
-                >
-                    {onPlay && (
-                        <PlaybackButton
-                            mode={playMode}
-                            active={playActive}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onPlay();
-                            }}
-                        />
-                    )}
-
-                    <span
-                        className="graph-badge"
-                        style={{ borderColor: color, color }}
-                    >
-                        {badge}
-                    </span>
-                </div>
-            </div>
-
-            <div className="graph-toolbar">
-                <span>
-                    {compact
-                        ? type === "time"
-                            ? "Scroll to zoom time · click to reposition · double-click to reset"
-                            : "Scroll to zoom frequency · click to reposition · double-click to reset"
-                        : "Click the graph to open the enlarged analysis view"}
-                </span>
-
-                {compact && (
-                    <div className="graph-zoom">
-                        <button
-                            type="button"
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onZoomChange(clamp(zoom - 0.5, 1, 16));
-                            }}
-                            aria-label={`Zoom out ${title}`}
-                        >
-                            −
-                        </button>
-
-                        <span>{Math.round(zoom * 100)}%</span>
-
-                        <button
-                            type="button"
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onZoomChange(clamp(zoom + 0.5, 1, 16));
-                            }}
-                            aria-label={`Zoom in ${title}`}
-                        >
-                            +
-                        </button>
-
-                        <button
-                            type="button"
-                            className="graph-reset"
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onZoomChange(1);
-                                onCenterChange(0.5);
-                            }}
-                        >
-                            Reset
-                        </button>
-                    </div>
-                )}
-            </div>
-
-            <div
-                className="graph-canvas-wrap"
-                style={compact ? { height: "520px" } : undefined}
-            >
-                <canvas
-                    ref={canvasRef}
-                    className="graph-canvas"
-                    onWheel={handleWheel}
-                    onMouseMove={handleMouseMove}
-                    onMouseLeave={handleMouseLeave}
-                    onDoubleClick={handleDoubleClick}
-                    onClick={(event) => {
-                        const rect =
-                            event.currentTarget.getBoundingClientRect();
-
-                        const ratio = clamp(
-                            (event.clientX - rect.left) /
-                                rect.width,
-                            0,
-                            1
-                        );
-
-                        onCenterChange(
-                            clamp(
-                                viewCenter -
-                                    0.5 / zoom +
-                                    ratio / zoom,
-                                0,
-                                1
-                            )
-                        );
-                    }}
-                />
-
-                {hover && (
-                    <div
-                        className="spectrum-tooltip"
-                        style={{
-                            left: hover.x,
-                            top: hover.y
-                        }}
-                    >
-                        {hover.text}
-                    </div>
-                )}
-            </div>
-        </article>
+        <div className="stage-graph">
+            <div className="stage-graph__title">{title}</div>
+            <canvas ref={canvasRef} className="stage-graph__canvas" style={{ height }} />
+        </div>
     );
 }
 
-function GraphModal({
-    graph,
-    onClose,
-    zoom,
-    viewCenter,
-    onZoomChange,
-    onCenterChange,
-    cursorProgress,
-    playActive,
-    onPlay,
-    duration = 1
+function StatusDot({ status }) {
+    return <span className={`step-status-dot step-status-dot--${status}`} title={status} />;
+}
+
+function ChainStepCard({
+    step,
+    index,
+    total,
+    status,
+    stageResult,
+    sampleRate,
+    expanded,
+    onToggleExpanded,
+    onMoveUp,
+    onMoveDown,
+    onRemove,
+    onParamsChange,
+    onOpenIrModal,
+    disabled,
 }) {
-    if (!graph) return null;
+    const meta = OPERATION_BY_TYPE[step.type];
+    const params = step.params;
+    const irMissing = step.type === "convolution" && !step.irFile;
+    const isBandType = params.band_type === "bandpass" || params.band_type === "bandstop";
+
+    const setParam = (key, value) => onParamsChange({ ...params, [key]: value });
 
     return (
-        <div
-            role="dialog"
-            aria-modal="true"
-            aria-label={`${graph.title} enlarged view`}
-            onClick={onClose}
-            onWheel={(event) => {
-                event.preventDefault();
-            }}
-            style={{
-                position: "fixed",
-                inset: 0,
-                zIndex: 1000,
-                background: "rgba(3, 7, 16, 0.78)",
-                backdropFilter: "blur(12px)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: "28px"
-            }}
-        >
-            <div
-                onClick={(event) => event.stopPropagation()}
-                style={{
-                    width: "min(1180px, 94vw)",
-                    maxHeight: "92vh",
-                    overflow: "hidden",
-                    border: "1px solid rgba(255,255,255,0.18)",
-                    borderRadius: "20px",
-                    background: "var(--studio-surface, rgba(18,25,45,0.96))",
-                    boxShadow: "0 28px 100px rgba(0,0,0,0.45)",
-                    padding: "18px"
-                }}
-            >
-                <div
-                    style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: "16px",
-                        marginBottom: "12px"
-                    }}
-                >
-                    <div>
-                        <div className="studio-eyebrow">
-                            ENLARGED ANALYSIS
-                        </div>
-                        <h2 style={{ margin: 0 }}>
-                            {graph.title}
-                        </h2>
-                        <p
-                            style={{
-                                margin: "4px 0 0",
-                                opacity: 0.7,
-                                fontSize: "12px"
-                            }}
-                        >
-                            {graph.subtitle}
-                        </p>
-                    </div>
+        <div className={`chain-step ${irMissing ? "chain-step--warning" : ""}`}>
+            <div className="chain-step__header">
+                <div className="chain-step__title">
+                    <StatusDot status={status} />
+                    <span className="chain-step__index">{index + 1}</span>
+                    <strong>{meta.label}</strong>
+                    {stageResult && <span className="chain-step__timing">{stageResult.elapsed_ms.toFixed(1)} ms</span>}
+                </div>
 
-                    <div
-                        style={{
-                            display: "flex",
-                            gap: "8px",
-                            alignItems: "center"
-                        }}
-                    >
-                        {onPlay && (
-                            <PlaybackButton
-                                mode={graph.playMode}
-                                active={playActive}
-                                onClick={onPlay}
-                            />
+                <div className="chain-step__actions">
+                    <button type="button" disabled={disabled || index === 0} onClick={onMoveUp} aria-label="Move step up">↑</button>
+                    <button type="button" disabled={disabled || index === total - 1} onClick={onMoveDown} aria-label="Move step down">↓</button>
+                    <button type="button" disabled={disabled} onClick={onRemove} aria-label="Remove step" className="chain-step__remove">✕</button>
+                </div>
+            </div>
+
+            <p className="chain-step__summary">{describeStep(step.type, step.type === "convolution" ? { irFileName: step.irFileName } : params)}</p>
+
+            <div className="chain-step__params">
+                {step.type === "amplify" && (
+                    <NumberField label="Gain factor" min={0.01} max={4} step={0.01} value={params.value}
+                        format={(v) => `x${v.toFixed(2)} (${formatDb(v)})`} disabled={disabled}
+                        onChange={(v) => setParam("value", v)} />
+                )}
+
+                {step.type === "filter" && (
+                    <>
+                        <SelectField label="Family" value={params.filter_family} options={FILTER_FAMILIES} disabled={disabled}
+                            onChange={(v) => setParam("filter_family", v)} />
+                        <SelectField label="Band type" value={params.band_type} options={BAND_TYPES} disabled={disabled}
+                            onChange={(v) => setParam("band_type", v)} />
+                        <NumberField label={isBandType ? "Low cutoff" : "Cutoff"}
+                            min={20} max={Math.min(20000, sampleRate ? sampleRate / 2 - 100 : 20000)} step={10}
+                            value={params.cutoff} unit=" Hz" disabled={disabled}
+                            onChange={(v) => setParam("cutoff", isBandType ? clamp(v, 20, params.cutoff2 - MIN_BAND_GAP_HZ) : v)} />
+                        {isBandType && (
+                            <NumberField label="High cutoff" min={20} max={Math.min(20000, sampleRate ? sampleRate / 2 - 50 : 20000)} step={10}
+                                value={params.cutoff2} unit=" Hz" disabled={disabled}
+                                onChange={(v) => setParam("cutoff2", clamp(v, params.cutoff + MIN_BAND_GAP_HZ, Math.min(20000, sampleRate ? sampleRate / 2 - 50 : 20000)))} />
                         )}
+                        {params.filter_family !== "ideal" && (
+                            <NumberField label="Order" min={1} max={10} step={1} value={params.order} disabled={disabled}
+                                onChange={(v) => setParam("order", v)} />
+                        )}
+                        <FilterMiniPreview params={params} sampleRate={sampleRate} />
+                    </>
+                )}
 
-                        <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={onClose}
-                        >
-                            Close
-                        </button>
+                {step.type === "convolution" && (
+                    <div className="chain-field chain-field--ir">
+                        <span>Impulse response</span>
+                        <div className="ir-row">
+                            <span className={irMissing ? "ir-missing" : "ir-name"}>
+                                {irMissing ? "No impulse response selected" : step.irFileName}
+                            </span>
+                            <button type="button" disabled={disabled} onClick={onOpenIrModal}>
+                                {irMissing ? "Upload IR" : "Change IR"}
+                            </button>
+                        </div>
                     </div>
-                </div>
+                )}
 
-                <GraphCanvas
-                    title={graph.title}
-                    subtitle={graph.subtitle}
-                    badge={graph.badge}
-                    data={graph.data}
-                    type={graph.type}
-                    color={graph.color}
-                    cursorProgress={cursorProgress}
-                    zoom={zoom}
-                    viewCenter={viewCenter}
-                    onZoomChange={onZoomChange}
-                    onCenterChange={onCenterChange}
-                    duration={duration}
-                    playMode={graph.playMode}
-                    playActive={playActive}
-                    onPlay={onPlay}
-                    compact
-                />
+                {step.type === "echo" && (
+                    <>
+                        <NumberField label="Delay" min={20} max={1000} step={10} value={params.delay_ms} unit=" ms" disabled={disabled}
+                            onChange={(v) => setParam("delay_ms", v)} />
+                        <NumberField label="Decay" min={0.05} max={0.95} step={0.01} value={params.decay} disabled={disabled}
+                            onChange={(v) => setParam("decay", v)} />
+                        <NumberField label="Repeats" min={1} max={10} step={1} value={params.repeats} disabled={disabled}
+                            onChange={(v) => setParam("repeats", v)} />
+                    </>
+                )}
 
-                <div
-                    style={{
-                        marginTop: "10px",
-                        fontSize: "11px",
-                        opacity: 0.65
-                    }}
-                >
-                    Scroll to zoom horizontally · click to reposition ·
-                    double-click to reset · the vertical scale auto-fits the
-                    visible signal
-                </div>
-            </div>
-        </div>
-    );
-}
+                {step.type === "delay" && (
+                    <>
+                        <NumberField label="Delay" min={20} max={1000} step={10} value={params.delay_ms} unit=" ms" disabled={disabled}
+                            onChange={(v) => setParam("delay_ms", v)} />
+                        <NumberField label="Wet mix" min={0} max={1} step={0.01} value={params.wet}
+                            format={(v) => `${Math.round(v * 100)}%`} disabled={disabled}
+                            onChange={(v) => setParam("wet", v)} />
+                    </>
+                )}
 
-function ModuleControl({
-    moduleKey,
-    config,
-    onToggle,
-    onChange
-}) {
-    const meta = MODULE_META[moduleKey];
+                {step.type === "reverb" && <p className="chain-field-note">Fixed room impulse response — no parameters to tune.</p>}
+                {step.type === "noise" && <p className="chain-field-note">Spectral-subtraction gate — no parameters to tune.</p>}
 
-    const displayValue =
-        moduleKey === "amplification"
-            ? `${config.value} dB`
-            : moduleKey === "pitch"
-              ? `${config.value > 0 ? "+" : ""}${config.value} st`
-              : `${config.value}%`;
+                {step.type === "equalizer" && (
+                    <>
+                        <NumberField label="Low" min={0} max={10} step={1} value={params.low} disabled={disabled} onChange={(v) => setParam("low", v)} />
+                        <NumberField label="Mid" min={0} max={10} step={1} value={params.mid} disabled={disabled} onChange={(v) => setParam("mid", v)} />
+                        <NumberField label="High" min={0} max={10} step={1} value={params.high} disabled={disabled} onChange={(v) => setParam("high", v)} />
+                    </>
+                )}
 
-    return (
-        <div className={`module-control ${config.enabled ? "is-on" : ""}`}>
-            <div className="module-control__top">
-                <div>
-                    <strong>{meta.name}</strong>
-                    <span>{meta.short}</span>
-                </div>
+                {step.type === "activity" && (
+                    <NumberField label="Threshold" min={0.02} max={0.6} step={0.01} value={params.threshold_ratio}
+                        format={(v) => `${Math.round(v * 100)}%`} disabled={disabled}
+                        onChange={(v) => setParam("threshold_ratio", v)} />
+                )}
 
-                <button
-                    type="button"
-                    className={`module-toggle ${
-                        config.enabled ? "is-active" : ""
-                    }`}
-                    onClick={() => onToggle(moduleKey)}
-                >
-                    {config.enabled ? "ON" : "OFF"}
-                </button>
-            </div>
-
-            <div className="module-control__slider-row">
-                <input
-                    type="range"
-                    min={meta.min}
-                    max={meta.max}
-                    step={meta.step}
-                    value={config.value}
-                    onChange={(event) =>
-                        onChange(moduleKey, Number(event.target.value))
-                    }
-                    disabled={!config.enabled}
-                    aria-label={`${meta.name} ${meta.short}`}
-                />
-
-                <output>{displayValue}</output>
-            </div>
-        </div>
-    );
-}
-
-function LevelMeter({ label, stats, clipped }) {
-    const level = clamp(
-        stats?.peak ?? 0,
-        0,
-        1
-    );
-
-    const rms = clamp(
-        stats?.rms ?? 0,
-        0,
-        1
-    );
-
-    return (
-        <div className="level-meter">
-            <div className="level-meter__heading">
-                <span>{label}</span>
-                {clipped > 0 && (
-                    <strong className="clip-warning">CLIP</strong>
+                {step.type === "morph" && (
+                    <>
+                        <SelectField label="Mode" value={params.morph_mode} options={MORPH_MODES} disabled={disabled}
+                            onChange={(v) => setParam("morph_mode", v)} />
+                        {params.morph_mode === "pitch" && (
+                            <NumberField label="Semitones" min={-12} max={12} step={1} value={params.n_steps} unit=" st" disabled={disabled}
+                                onChange={(v) => setParam("n_steps", v)} />
+                        )}
+                        {params.morph_mode === "stretch" && (
+                            <NumberField label="Rate" min={0.5} max={2} step={0.05} value={params.rate} disabled={disabled}
+                                onChange={(v) => setParam("rate", v)} />
+                        )}
+                    </>
                 )}
             </div>
 
-            <div className="meter-track">
-                <div
-                    className="meter-rms"
-                    style={{ width: `${rms * 100}%` }}
-                />
-                <div
-                    className="meter-peak"
-                    style={{ width: `${level * 100}%` }}
-                />
-            </div>
+            {stageResult && (
+                <div className="chain-step__result">
+                    <button type="button" className="chain-step__toggle" onClick={onToggleExpanded}>
+                        {expanded ? "▾ Hide result" : "▸ View result"}
+                    </button>
 
-            <div className="level-meter__footer">
-                <span>
-                    RMS{" "}
-                    {Number.isFinite(stats?.db)
-                        ? `${stats.db.toFixed(1)} dB`
-                        : "—"}
-                </span>
-                <span>PEAK {Math.round(level * 100)}%</span>
+                    {expanded && (
+                        <div className="chain-step__graphs">
+                            {stageResult.impulseResponse && (
+                                <>
+                                    <StaticGraph title="Impulse Response · Time" type="time" data={stageResult.impulseResponse.waveform} color="#ff8fd6" />
+                                    <StaticGraph title="Impulse Response · Frequency" type="spectrum" data={stageResult.impulseResponse.spectrum} color="#ff8fd6" />
+                                </>
+                            )}
+                            <StaticGraph title={`${meta.label} Output · Time`} type="time" data={stageResult.waveform} color="var(--output-accent)" />
+                            <StaticGraph title={`${meta.label} Output · Frequency`} type="spectrum" data={stageResult.spectrum} color="var(--output-accent)" />
+                            {stageResult.filterResponse && (
+                                <StaticGraph title="Filter Response |H(f)|" type="spectrum" data={stageResult.filterResponse} color="#72e6ff" />
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ConvolutionModal({ onConfirm, onCancel }) {
+    const [file, setFile] = useState(null);
+    const inputRef = useRef(null);
+
+    return (
+        <div className="ir-modal-backdrop" onClick={onCancel}>
+            <div className="ir-modal" onClick={(e) => e.stopPropagation()}>
+                <h3>Choose an impulse response</h3>
+                <p>Convolution needs a second audio file — the impulse response it will be convolved with.</p>
+
+                <input
+                    ref={inputRef}
+                    type="file"
+                    accept="audio/*,.wav,.mp3,.ogg"
+                    onChange={(event) => setFile(event.target.files?.[0] || null)}
+                />
+
+                <div className="ir-modal__actions">
+                    <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
+                    <button type="button" className="process-button" disabled={!file} onClick={() => file && onConfirm(file)}>
+                        Use this impulse response
+                    </button>
+                </div>
             </div>
         </div>
     );
 }
 
-function PlaybackButton({ mode, active, onClick }) {
+function HistoryPanel({ history, compareIds, onToggleCompare, onRemove }) {
+    if (!history.length) {
+        return (
+            <div className="history-empty">
+                Runs you complete will appear here (up to {MAX_HISTORY}) so you can compare processed results side by side.
+            </div>
+        );
+    }
+
     return (
-        <button
-            type="button"
-            className={`playback-button ${active ? "is-active" : ""}`}
-            onClick={onClick}
-        >
-            <span>{active ? "Ⅱ" : "▶"}</span>
-            {mode === "input" ? "Input" : "Output"}
-        </button>
+        <div className="history-list">
+            {history.map((entry) => (
+                <div key={entry.id} className={`history-item ${compareIds.includes(entry.id) ? "is-selected" : ""}`}>
+                    <label className="history-item__select">
+                        <input
+                            type="checkbox"
+                            checked={compareIds.includes(entry.id)}
+                            onChange={() => onToggleCompare(entry.id)}
+                        />
+                        <div>
+                            <strong>{entry.chainLabel}</strong>
+                            <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                    </label>
+                    <div className="history-item__actions">
+                        <audio controls src={entry.audioUrl} />
+                        <button type="button" onClick={() => onRemove(entry.id)} aria-label="Remove from history">✕</button>
+                    </div>
+                </div>
+            ))}
+        </div>
     );
 }
 
 export default function Studio() {
     const fileInputRef = useRef(null);
-    const audioContextRef = useRef(null);
-    const sourceRef = useRef(null);
-    const animationRef = useRef(null);
-    const scanStartRef = useRef(0);
-    const playbackStartRef = useRef(0);
-    const playbackOffsetRef = useRef(0);
-    const autoProcessTimerRef = useRef(null);
+    const timersRef = useRef([]);
 
-    const [audioBuffer, setAudioBuffer] = useState(null);
-    const [processedBuffer, setProcessedBuffer] = useState(null);
-    const [fileName, setFileName] = useState("");
-    const [inputWaveform, setInputWaveform] = useState([]);
-    const [outputWaveform, setOutputWaveform] = useState([]);
-    const [inputSpectrum, setInputSpectrum] = useState([]);
-    const [outputSpectrum, setOutputSpectrum] = useState([]);
-    const [modules, setModules] = useState(copyModules);
-    const [analyzed, setAnalyzed] = useState(false);
-    const [processing, setProcessing] = useState(false);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [playMode, setPlayMode] = useState(null);
-    const [progress, setProgress] = useState(0);
-    const [scanProgress, setScanProgress] = useState(0);
-    const [graphViews, setGraphViews] = useState({});
+    const [audioFile, setAudioFile] = useState(null);
+    const [audioUrl, setAudioUrl] = useState("");
+    const [fileMeta, setFileMeta] = useState(null); // { duration, sampleRate, channels }
 
-    const getGraphView = useCallback(
-        (key) =>
-            graphViews[key] || {
-                zoom: 1,
-                center: 0.5
-            },
-        [graphViews]
-    );
+    const [chain, setChain] = useState([]);
+    const [stepStatus, setStepStatus] = useState({});
+    const [expandedSteps, setExpandedSteps] = useState({});
+    const [convModalStepId, setConvModalStepId] = useState(null);
 
-    const updateGraphView = useCallback((key, patch) => {
-        setGraphViews((current) => ({
-            ...current,
-            [key]: {
-                ...(current[key] || {
-                    zoom: 1,
-                    center: 0.5
-                }),
-                ...patch
-            }
-        }));
-    }, []);
-    const [loopPlayback, setLoopPlayback] = useState(true);
-    const [abMode, setAbMode] = useState(false);
-    const [expandedGraph, setExpandedGraph] = useState(null);
-    const [hoverMode, setHoverMode] = useState(false);
-    const [stats, setStats] = useState({
-        input: { peak: 0, rms: 0, db: -Infinity },
-        output: { peak: 0, rms: 0, db: -Infinity },
-        clipped: 0
-    });
+    const [running, setRunning] = useState(false);
+    const [runError, setRunError] = useState("");
+    const [result, setResult] = useState(null);
 
-    const duration = audioBuffer?.duration || 0;
+    const [history, setHistory] = useState(loadHistory);
+    const [compareIds, setCompareIds] = useState([]);
 
-    const currentProgress = isPlaying ? progress : scanProgress;
-
-    const stopPlayback = useCallback(() => {
-        if (sourceRef.current) {
-            try {
-                sourceRef.current.onended = null;
-                sourceRef.current.stop();
-            } catch {
-                // Source may already be stopped.
-            }
-
-            sourceRef.current.disconnect();
-            sourceRef.current = null;
-        }
-
-        setIsPlaying(false);
-        setPlayMode(null);
-    }, []);
-
-    const createAudioContext = useCallback(() => {
-        if (!audioContextRef.current) {
-            audioContextRef.current = new AudioContext();
-        }
-
-        return audioContextRef.current;
-    }, []);
-
-    const playBuffer = useCallback(
-        async (mode, offset = 0) => {
-            const buffer =
-                mode === "input" ? audioBuffer : processedBuffer;
-
-            if (!buffer) return;
-
-            stopPlayback();
-
-            const context = createAudioContext();
-
-            if (context.state === "suspended") {
-                await context.resume();
-            }
-
-            const source = context.createBufferSource();
-            source.buffer = buffer;
-            source.connect(context.destination);
-
-            const safeOffset = clamp(
-                offset,
-                0,
-                Math.max(0, buffer.duration - 0.01)
-            );
-
-            playbackStartRef.current =
-                context.currentTime - safeOffset;
-
-            playbackOffsetRef.current = safeOffset;
-
-            source.onended = () => {
-                if (sourceRef.current !== source) return;
-
-                if (loopPlayback) {
-                    playBuffer(mode, 0);
-                    return;
-                }
-
-                setIsPlaying(false);
-                setPlayMode(null);
-                sourceRef.current = null;
-            };
-
-            source.start(0, safeOffset);
-            sourceRef.current = source;
-
-            setPlayMode(mode);
-            setIsPlaying(true);
-        },
-        [
-            audioBuffer,
-            processedBuffer,
-            createAudioContext,
-            loopPlayback,
-            stopPlayback
-        ]
-    );
-
-    const processAndAnalyze = useCallback(
-        async (buffer = audioBuffer) => {
-            if (!buffer) return;
-
-            setProcessing(true);
-            stopPlayback();
-
-            await new Promise((resolve) => requestAnimationFrame(resolve));
-
-            const result = processAudioBuffer(buffer, modules);
-            const inputChannel = buffer.getChannelData(0);
-            const outputChannel = result.buffer.getChannelData(0);
-
-            setProcessedBuffer(result.buffer);
-            setInputWaveform(makeDisplayWaveform(inputChannel));
-            setOutputWaveform(makeDisplayWaveform(outputChannel));
-            setInputSpectrum(calculateSpectrum(inputChannel));
-            setOutputSpectrum(calculateSpectrum(outputChannel));
-            setStats({
-                input: levelStats(inputChannel),
-                output: levelStats(outputChannel),
-                clipped: result.clippedSamples
-            });
-            setAnalyzed(true);
-            setProcessing(false);
-            setScanProgress(0);
-            scanStartRef.current = performance.now();
-        },
-        [audioBuffer, modules, stopPlayback]
-    );
+    useEffect(() => () => {
+        timersRef.current.forEach((t) => window.clearTimeout(t));
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+    }, [audioUrl]);
 
     const handleFile = async (file) => {
         if (!file) return;
 
-        stopPlayback();
-        setProcessing(true);
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+        const url = URL.createObjectURL(file);
+
+        setAudioFile(file);
+        setAudioUrl(url);
+        setResult(null);
+        setRunError("");
 
         try {
-            const context = createAudioContext();
+            const context = new (window.AudioContext || window.webkitAudioContext)();
             const arrayBuffer = await file.arrayBuffer();
             const decoded = await context.decodeAudioData(arrayBuffer);
-
-            setAudioBuffer(decoded);
-            setProcessedBuffer(null);
-            setFileName(file.name);
-            setAnalyzed(false);
-            setProgress(0);
-            setScanProgress(0);
-            setInputWaveform(
-                makeDisplayWaveform(decoded.getChannelData(0))
-            );
-            setOutputWaveform([]);
-            setInputSpectrum([]);
-            setOutputSpectrum([]);
-            setStats({
-                input: levelStats(decoded.getChannelData(0)),
-                output: { peak: 0, rms: 0, db: -Infinity },
-                clipped: 0
+            setFileMeta({
+                duration: decoded.duration,
+                sampleRate: decoded.sampleRate,
+                channels: decoded.numberOfChannels,
             });
-        } catch (error) {
-            console.error("Unable to decode audio:", error);
-            alert("This audio file could not be decoded by the browser.");
-        } finally {
-            setProcessing(false);
+            context.close();
+        } catch {
+            setFileMeta(null);
         }
     };
 
@@ -1417,246 +584,136 @@ export default function Studio() {
         event.target.value = "";
     };
 
-    const handleUploadBoxClick = () => {
-        fileInputRef.current?.click();
+    const addOperation = (type) => {
+        if (chain.length >= MAX_CHAIN_STEPS || running) return;
+
+        const meta = OPERATION_BY_TYPE[type];
+        const id = makeId();
+        const newStep = { id, type, params: { ...meta.defaultParams }, irFile: null, irFileName: "" };
+
+        setChain((current) => [...current, newStep]);
+        setResult(null);
+
+        if (meta.requiresIr) {
+            setConvModalStepId(id);
+        }
     };
 
-    const updateModule = (key, value) => {
-        setModules((current) => ({
-            ...current,
-            [key]: {
-                ...current[key],
-                value
-            }
-        }));
+    const updateStepParams = (id, params) => {
+        setChain((current) => current.map((s) => (s.id === id ? { ...s, params } : s)));
+        setResult(null);
     };
 
-    const toggleModule = (key) => {
-        setModules((current) => ({
-            ...current,
-            [key]: {
-                ...current[key],
-                enabled: !current[key].enabled
-            }
-        }));
+    const removeStep = (id) => {
+        setChain((current) => current.filter((s) => s.id !== id));
+        setResult(null);
     };
 
-    const toggleBypass = () => {
-        setModules((current) => {
-            const anyEnabled = Object.values(current).some(
-                (module) => module.enabled
-            );
-
-            return Object.fromEntries(
-                Object.entries(current).map(([key, module]) => [
-                    key,
-                    {
-                        ...module,
-                        enabled: !anyEnabled
-                    }
-                ])
-            );
+    const moveStep = (id, direction) => {
+        setChain((current) => {
+            const index = current.findIndex((s) => s.id === id);
+            const target = index + direction;
+            if (index < 0 || target < 0 || target >= current.length) return current;
+            const next = [...current];
+            [next[index], next[target]] = [next[target], next[index]];
+            return next;
         });
+        setResult(null);
     };
 
-    useEffect(() => {
-        if (!analyzed || !audioBuffer) return;
-
-        window.clearTimeout(autoProcessTimerRef.current);
-
-        autoProcessTimerRef.current = window.setTimeout(() => {
-            processAndAnalyze(audioBuffer);
-        }, 320);
-
-        return () => window.clearTimeout(autoProcessTimerRef.current);
-    }, [modules, analyzed, audioBuffer, processAndAnalyze]);
-
-    useEffect(() => {
-        let frame;
-
-        const animate = (now) => {
-            if (isPlaying && audioBuffer) {
-                const context = audioContextRef.current;
-                const elapsed =
-                    context?.currentTime - playbackStartRef.current;
-
-                const raw = Number.isFinite(elapsed)
-                    ? elapsed
-                    : 0;
-
-                const next = duration
-                    ? clamp(raw / duration, 0, 1)
-                    : 0;
-
-                setProgress(next);
-            } else if (analyzed) {
-                // When audio is not playing, the analysis cursor performs a
-                // slow overview pass. One pass is approximately the real
-                // audio duration, with a small minimum so short clips remain
-                // readable. This prevents the cursor from racing across the
-                // graph in a few seconds on long recordings.
-                const scanDuration = Math.max(
-                    12_000,
-                    (duration || 1) * 1000
-                );
-                const elapsed =
-                    (now - scanStartRef.current) / scanDuration;
-
-                setScanProgress(elapsed % 1);
-            }
-
-            frame = requestAnimationFrame(animate);
-        };
-
-        frame = requestAnimationFrame(animate);
-
-        return () => cancelAnimationFrame(frame);
-    }, [analyzed, audioBuffer, duration, isPlaying]);
-
-    useEffect(() => {
-        if (!abMode || !isPlaying || !duration || !playMode) return;
-
-        const switchDelay = Math.max(1800, Math.min(5000, duration * 1000));
-
-        const timer = window.setTimeout(() => {
-            const nextMode = playMode === "input" ? "output" : "input";
-            const currentOffset = progress * duration;
-            playBuffer(nextMode, currentOffset);
-        }, switchDelay);
-
-        return () => window.clearTimeout(timer);
-    }, [
-        abMode,
-        isPlaying,
-        playMode,
-        duration,
-        playBuffer
-    ]);
-
-    useEffect(() => {
-        if (!expandedGraph) return;
-
-        const previousOverflow = document.body.style.overflow;
-        document.body.style.overflow = "hidden";
-
-        const onKeyDown = (event) => {
-            if (event.key === "Escape") {
-                setExpandedGraph(null);
-            }
-        };
-
-        window.addEventListener("keydown", onKeyDown);
-
-        return () => {
-            document.body.style.overflow = previousOverflow;
-            window.removeEventListener("keydown", onKeyDown);
-        };
-    }, [expandedGraph]);
-
-    useEffect(() => {
-        return () => {
-            stopPlayback();
-            window.clearTimeout(autoProcessTimerRef.current);
-            audioContextRef.current?.close();
-        };
-    }, [stopPlayback]);
-
-    const seek = (event) => {
-        if (!duration) return;
-
-        const rect = event.currentTarget.getBoundingClientRect();
-        const ratio = clamp(
-            (event.clientX - rect.left) / rect.width,
-            0,
-            1
-        );
-
-        setProgress(ratio);
-
-        if (isPlaying && playMode) {
-            playBuffer(playMode, ratio * duration);
-        }
+    const setStepIr = (id, file) => {
+        setChain((current) => current.map((s) => (s.id === id ? { ...s, irFile: file, irFileName: file.name } : s)));
+        setResult(null);
     };
 
-    const handlePlayInput = () => {
-        if (!audioBuffer) return;
+    const toggleExpanded = (id) => {
+        setExpandedSteps((current) => ({ ...current, [id]: !current[id] }));
+    };
 
-        if (isPlaying && playMode === "input") {
-            stopPlayback();
+    const toggleCompare = (id) => {
+        setCompareIds((current) => (current.includes(id) ? current.filter((c) => c !== id) : [...current, id]));
+    };
+
+    const removeHistoryEntry = (id) => {
+        setHistory((current) => {
+            const next = current.filter((e) => e.id !== id);
+            saveHistory(next);
+            return next;
+        });
+        setCompareIds((current) => current.filter((c) => c !== id));
+    };
+
+    const missingIrSteps = chain.filter((s) => s.type === "convolution" && !s.irFile);
+    const canRun = audioFile && chain.length > 0 && missingIrSteps.length === 0 && !running;
+
+    const runChain = async () => {
+        if (!canRun) {
+            if (missingIrSteps.length > 0) {
+                setRunError("Every Convolution step needs an impulse response file before you can run the chain.");
+            } else if (chain.length === 0) {
+                setRunError("Add at least one operation to the chain first.");
+            }
             return;
         }
 
-        playBuffer("input", progress * duration);
-    };
+        setRunError("");
+        setRunning(true);
+        setResult(null);
+        setExpandedSteps({});
 
-    const handlePlayOutput = () => {
-        if (!processedBuffer) return;
+        const orderSnapshot = chain.map((s) => s.id);
+        const initialStatus = Object.fromEntries(orderSnapshot.map((id) => [id, "pending"]));
+        setStepStatus(initialStatus);
 
-        if (isPlaying && playMode === "output") {
-            stopPlayback();
-            return;
+        try {
+            const payload = chain.map((s) => ({
+                type: s.type,
+                params: s.type === "convolution" ? {} : s.params,
+            }));
+            const irFiles = chain.filter((s) => s.type === "convolution").map((s) => s.irFile);
+
+            const data = await processChain(audioFile, payload, irFiles);
+            setResult(data);
+
+            // Reveal each step's green status in order, timed to that step's
+            // real measured duration (clamped so short steps still read as a
+            // visible, distinct tick rather than an instant flash).
+            let cumulative = 0;
+            data.stages.forEach((stage, i) => {
+                const delay = clamp(stage.elapsed_ms, 150, 900);
+                cumulative += delay;
+                const timer = window.setTimeout(() => {
+                    setStepStatus((current) => ({ ...current, [orderSnapshot[i]]: "done" }));
+                    if (i === data.stages.length - 1) {
+                        setRunning(false);
+
+                        const entry = {
+                            id: makeId(),
+                            timestamp: Date.now(),
+                            chainLabel: chain.map((s) => OPERATION_BY_TYPE[s.type].short).join(" → "),
+                            audioUrl: data.output.audio_url,
+                            waveform: data.output.waveform,
+                            spectrum: data.output.spectrum,
+                            stats: data.output.stats,
+                        };
+                        setHistory((current) => {
+                            const next = [entry, ...current].slice(0, MAX_HISTORY);
+                            saveHistory(next);
+                            return next;
+                        });
+                    }
+                }, cumulative);
+                timersRef.current.push(timer);
+            });
+        } catch (error) {
+            console.error(error);
+            setRunError(error.message || "Chain processing failed.");
+            setStepStatus(Object.fromEntries(orderSnapshot.map((id) => [id, "error"])));
+            setRunning(false);
         }
-
-        playBuffer("output", progress * duration);
     };
 
-    const activeStats = useMemo(
-        () => ({
-            input: stats.input,
-            output: stats.output
-        }),
-        [stats]
-    );
-
-    const graphDefinitions = useMemo(
-        () => [
-            {
-                key: "input-time",
-                title: "INPUT · ORIGINAL",
-                subtitle: "Time Domain / Amplitude",
-                badge: "INPUT",
-                data: inputWaveform,
-                type: "time",
-                color: "var(--input-accent)",
-                playMode: "input"
-            },
-            {
-                key: "output-time",
-                title: "OUTPUT · PROCESSED",
-                subtitle: "Time Domain / Amplitude",
-                badge: "OUTPUT",
-                data: outputWaveform,
-                type: "time",
-                color: "var(--output-accent)",
-                playMode: "output"
-            },
-            {
-                key: "input-spectrum",
-                title: "INPUT · ORIGINAL",
-                subtitle: "Frequency Domain / Discrete FFT",
-                badge: "INPUT",
-                data: inputSpectrum,
-                type: "spectrum",
-                color: "var(--input-accent)",
-                playMode: "input"
-            },
-            {
-                key: "output-spectrum",
-                title: "OUTPUT · PROCESSED",
-                subtitle: "Frequency Domain / Discrete FFT",
-                badge: "OUTPUT",
-                data: outputSpectrum,
-                type: "spectrum",
-                color: "var(--output-accent)",
-                playMode: "output"
-            }
-        ],
-        [inputWaveform, outputWaveform, inputSpectrum, outputSpectrum]
-    );
-
-    const expandedGraphData = expandedGraph
-        ? graphDefinitions.find((graph) => graph.key === expandedGraph)
-        : null;
+    const compareEntries = history.filter((e) => compareIds.includes(e.id));
 
     return (
         <main className="studio-page">
@@ -1672,470 +729,146 @@ export default function Studio() {
                 <header className="studio-header">
                     <div>
                         <div className="studio-eyebrow">DSP / STUDIO</div>
-                        <h1>Interactive Signal Studio</h1>
-                        <p>
-                            Analyze, shape and visualize your audio signal in
-                            real time.
-                        </p>
+                        <h1>Multi-Operation Signal Studio</h1>
+                        <p>Chain any of the course's DSP effects in the order you choose, then compare input and output.</p>
                     </div>
-
-                    <button
-                        type="button"
-                        className="back-button"
-                        onClick={() => {
-                            window.location.hash = "";
-                        }}
-                    >
-                        ← Back
-                    </button>
+                    <button type="button" className="back-button" onClick={() => { window.location.hash = ""; }}>← Back</button>
                 </header>
 
-                <section
-                    className="studio-workspace"
-                    style={
-                        analyzed
-                            ? { gridTemplateColumns: "minmax(0, 1fr)" }
-                            : undefined
-                    }
-                >
-                    <div
-                        className={`audio-panel ${
-                            audioBuffer ? "has-audio" : ""
-                        }`}
-                    >
-                        <div className="panel-label">AUDIO INPUT</div>
-
-                        {!audioBuffer ? (
-                            <button
-                                type="button"
-                                className="upload-zone"
-                                onClick={handleUploadBoxClick}
-                            >
-                                <div className="upload-icon">＋</div>
-                                <strong>Drop an audio file here</strong>
-                                <span>
-                                    or click anywhere to upload WAV, MP3,
-                                    OGG or another browser-supported format
-                                </span>
-                            </button>
-                        ) : (
-                            <>
-                                <div className="audio-file-row">
-                                    <div>
-                                        <strong>{fileName}</strong>
-                                        <span>
-                                            {analyzed
-                                                ? "Analysis complete"
-                                                : "Ready for analysis"}
-                                        </span>
-                                    </div>
-
-                                    <button
-                                        type="button"
-                                        className="secondary-button"
-                                        onClick={handleUploadBoxClick}
-                                    >
-                                        Replace
-                                    </button>
-                                </div>
-
-                                <div className="main-waveform-wrap">
-                                    <div className="main-waveform-meta">
-                                        <span>ORIGINAL SIGNAL</span>
-                                        <span>
-                                            {audioBuffer
-                                                ? `${audioBuffer.numberOfChannels} ch · ${Math.round(
-                                                      audioBuffer.sampleRate
-                                                  )} Hz`
-                                                : ""}
-                                        </span>
-                                    </div>
-
-                                    <GraphCanvas
-                                        title=""
-                                        subtitle=""
-                                        badge=""
-                                        data={inputWaveform}
-                                        type="time"
-                                        color="var(--input-accent)"
-                                        cursorProgress={currentProgress}
-                                        zoom={getGraphView("main").zoom}
-                                        viewCenter={getGraphView("main").center}
-                                        onZoomChange={(value) =>
-                                            updateGraphView("main", {
-                                                zoom: value
-                                            })
-                                        }
-                                        onCenterChange={(value) =>
-                                            updateGraphView("main", {
-                                                center: value
-                                            })
-                                        }
-                                        duration={duration}
-                                    />
-                                </div>
-
-                                <div className="player-row">
-                                    <div
-                                        className="transport-track"
-                                        onClick={seek}
-                                        role="slider"
-                                        tabIndex={0}
-                                        aria-label="Audio position"
-                                        aria-valuemin={0}
-                                        aria-valuemax={100}
-                                        aria-valuenow={Math.round(
-                                            progress * 100
-                                        )}
-                                    >
-                                        <div
-                                            className="transport-fill"
-                                            style={{
-                                                width: `${progress * 100}%`
-                                            }}
-                                        />
-                                        <div
-                                            className="transport-cursor"
-                                            style={{
-                                                left: `${progress * 100}%`
-                                            }}
-                                        />
-                                    </div>
-
-                                    <span className="time-readout">
-                                        {formatTime(progress * duration)}
-                                        <span>/</span>
-                                        {formatTime(duration)}
-                                    </span>
-                                </div>
-
-                                <div className="player-options">
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={loopPlayback}
-                                            onChange={(event) =>
-                                                setLoopPlayback(
-                                                    event.target.checked
-                                                )
-                                            }
-                                        />
-                                        <span>Loop</span>
-                                    </label>
-
-                                    <button
-                                        type="button"
-                                        className={`ab-button ${
-                                            abMode ? "is-active" : ""
-                                        }`}
-                                        onClick={() => {
-                                            setAbMode((current) => !current);
-                                        }}
-                                        disabled={!processedBuffer}
-                                    >
-                                        A/B
-                                    </button>
-
-                                    <span className="playback-hint">
-                                        {isPlaying
-                                            ? `Playing ${
-                                                  playMode === "input"
-                                                      ? "original"
-                                                      : "processed"
-                                              } audio`
-                                            : analyzed
-                                              ? "Analysis cursor active"
-                                              : "Upload and analyze to begin"}
-                                    </span>
-                                </div>
-                            </>
-                        )}
-                    </div>
-
-                    {!analyzed && (
-                        <aside className="controls-panel">
-                                                    <div className="panel-label">PROCESSING CONTROLS</div>
-
-                        <div className="controls-list">
-                            {Object.keys(MODULE_META).map((key) => (
-                                <ModuleControl
-                                    key={key}
-                                    moduleKey={key}
-                                    config={modules[key]}
-                                    onToggle={toggleModule}
-                                    onChange={updateModule}
-                                />
-                            ))}
-                        </div>
-
-                        <div className="controls-actions">
-                            <button
-                                type="button"
-                                className="bypass-button"
-                                onClick={toggleBypass}
-                                disabled={!audioBuffer}
-                            >
-                                BYPASS / ENABLE
-                            </button>
-
-                            <button
-                                type="button"
-                                className="process-button"
-                                onClick={() => processAndAnalyze()}
-                                disabled={!audioBuffer || processing}
-                            >
-                                {processing
-                                    ? "Processing…"
-                                    : analyzed
-                                      ? "Re-process & Analyze"
-                                      : "Analyze & Process"}
-                            </button>
-                        </div>
-
-                        <div className="meter-grid">
-                            <LevelMeter
-                                label="INPUT LEVEL"
-                                stats={activeStats.input}
-                                clipped={0}
-                            />
-                            <LevelMeter
-                                label="OUTPUT LEVEL"
-                                stats={activeStats.output}
-                                clipped={stats.clipped}
-                            />
-                        </div>
-                    
-
-                        </aside>
-                    )}
-                </section>
-
-                <section className="analysis-section">
-                    <div className="analysis-heading">
-                        <div>
-                            <div className="studio-eyebrow">SIGNAL ANALYSIS</div>
-                            <h2>Input / Output Analysis</h2>
-                            <p>
-                                Compare the original signal with the processed
-                                output while the playback cursor moves through
-                                the file.
-                            </p>
-                        </div>
-
-                        <div className="analysis-status">
-                            <span
-                                className={
-                                    analyzed ? "status-dot active" : "status-dot"
-                                }
-                            />
-                            {analyzed ? "ANALYZED" : "WAITING"}
-                        </div>
-                    </div>
-
-                    {!analyzed ? (
-                        <div className="analysis-empty">
-                            <div className="empty-orb">∿</div>
-                            <strong>
-                                Your four analysis views will appear here
-                            </strong>
-                            <span>
-                                Upload an audio file, choose your modules and
-                                press Analyze &amp; Process.
-                            </span>
-                        </div>
+                <section className="audio-panel has-audio">
+                    <div className="panel-label">AUDIO INPUT</div>
+                    {!audioFile ? (
+                        <button type="button" className="upload-zone" onClick={() => fileInputRef.current?.click()}>
+                            <div className="upload-icon">＋</div>
+                            <strong>Drop an audio file here</strong>
+                            <span>or click anywhere to upload WAV, MP3, OGG or another browser-supported format</span>
+                        </button>
                     ) : (
                         <>
-                            <div className="signal-legend">
-                                <span>
-                                    <i className="legend-dot input" />
-                                    ORIGINAL INPUT
-                                </span>
-                                <span>
-                                    <i className="legend-dot output" />
-                                    PROCESSED OUTPUT
-                                </span>
-                                <span className="legend-note">
-                                    Scroll over a graph to zoom · click to
-                                    reposition · double-click to reset
-                                </span>
+                            <div className="audio-file-row">
+                                <div>
+                                    <strong>{audioFile.name}</strong>
+                                    <span>
+                                        {fileMeta
+                                            ? `${fileMeta.channels} ch · ${Math.round(fileMeta.sampleRate)} Hz · ${fileMeta.duration.toFixed(1)}s`
+                                            : "Loading metadata…"}
+                                    </span>
+                                </div>
+                                <button type="button" className="secondary-button" onClick={() => fileInputRef.current?.click()}>Replace</button>
                             </div>
-
-                            <div className="analysis-grid">
-                                {graphDefinitions.map((graph) => (
-                                    <GraphCanvas
-                                        key={graph.key}
-                                        title={graph.title}
-                                        subtitle={graph.subtitle}
-                                        badge={graph.badge}
-                                        data={graph.data}
-                                        type={graph.type}
-                                        color={graph.color}
-                                        cursorProgress={currentProgress}
-                                        zoom={getGraphView(graph.key).zoom}
-                                        viewCenter={getGraphView(graph.key).center}
-                                        onZoomChange={(value) =>
-                                            updateGraphView(graph.key, {
-                                                zoom: value
-                                            })
-                                        }
-                                        onCenterChange={(value) =>
-                                            updateGraphView(graph.key, {
-                                                center: value
-                                            })
-                                        }
-                                        duration={duration}
-                                        playMode={graph.playMode}
-                                        playActive={
-                                            isPlaying &&
-                                            playMode === graph.playMode
-                                        }
-                                        onPlay={
-                                            graph.playMode === "input"
-                                                ? handlePlayInput
-                                                : handlePlayOutput
-                                        }
-                                        onOpen={() =>
-                                            setExpandedGraph(graph.key)
-                                        }
-                                    />
-                                ))}
-                            </div>
-
-                            <div className="analysis-footer">
-                                <span>
-                                    Cursor{" "}
-                                    <strong>
-                                        {formatTime(
-                                            currentProgress * duration
-                                        )}
-                                    </strong>
-                                </span>
-
-                                <span>
-                                    Peak output{" "}
-                                    <strong>
-                                        {Math.round(
-                                            stats.output.peak * 100
-                                        )}
-                                        %
-                                    </strong>
-                                </span>
-
-                                <span>
-                                    Clipped samples{" "}
-                                    <strong>
-                                        {stats.clipped.toLocaleString()}
-                                    </strong>
-                                </span>
-                            </div>
+                            <audio controls src={audioUrl} className="native-player" />
                         </>
                     )}
                 </section>
 
-                {analyzed && (
-                    <section
-                        className="controls-panel"
-                        style={{
-                            marginTop: "14px"
-                        }}
-                    >
-                        
-                        <div className="panel-label">PROCESSING CONTROLS</div>
+                <section className="chain-builder">
+                    <div className="panel-label">OPERATION CHAIN</div>
+                    <p className="chain-builder__hint">
+                        Add operations, arrange their order, then run the chain. Each step's output feeds the next.
+                        {chain.length >= MAX_CHAIN_STEPS && ` (limit of ${MAX_CHAIN_STEPS} steps reached)`}
+                    </p>
 
-                        <div className="controls-list">
-                            {Object.keys(MODULE_META).map((key) => (
-                                <ModuleControl
-                                    key={key}
-                                    moduleKey={key}
-                                    config={modules[key]}
-                                    onToggle={toggleModule}
-                                    onChange={updateModule}
+                    <div className="operation-palette">
+                        {OPERATIONS.map((op) => (
+                            <button
+                                key={op.type}
+                                type="button"
+                                disabled={running || chain.length >= MAX_CHAIN_STEPS}
+                                onClick={() => addOperation(op.type)}
+                            >
+                                + {op.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {chain.length === 0 ? (
+                        <div className="chain-empty">No operations yet — add one above to get started.</div>
+                    ) : (
+                        <div className="chain-list">
+                            {chain.map((step, index) => (
+                                <ChainStepCard
+                                    key={step.id}
+                                    step={step}
+                                    index={index}
+                                    total={chain.length}
+                                    status={stepStatus[step.id] || "idle"}
+                                    stageResult={result?.stages?.[index]}
+                                    sampleRate={fileMeta?.sampleRate}
+                                    expanded={!!expandedSteps[step.id]}
+                                    onToggleExpanded={() => toggleExpanded(step.id)}
+                                    onMoveUp={() => moveStep(step.id, -1)}
+                                    onMoveDown={() => moveStep(step.id, 1)}
+                                    onRemove={() => removeStep(step.id)}
+                                    onParamsChange={(params) => updateStepParams(step.id, params)}
+                                    onOpenIrModal={() => setConvModalStepId(step.id)}
+                                    disabled={running}
                                 />
                             ))}
                         </div>
+                    )}
 
-                        <div className="controls-actions">
-                            <button
-                                type="button"
-                                className="bypass-button"
-                                onClick={toggleBypass}
-                                disabled={!audioBuffer}
-                            >
-                                BYPASS / ENABLE
-                            </button>
+                    {runError && <div className="chain-error">{runError}</div>}
 
-                            <button
-                                type="button"
-                                className="process-button"
-                                onClick={() => processAndAnalyze()}
-                                disabled={!audioBuffer || processing}
-                            >
-                                {processing
-                                    ? "Processing…"
-                                    : analyzed
-                                      ? "Re-process & Analyze"
-                                      : "Analyze & Process"}
-                            </button>
+                    <button type="button" className="process-button chain-run-button" disabled={!canRun} onClick={runChain}>
+                        {running ? "Processing…" : "Run Chain"}
+                    </button>
+                </section>
+
+                {result && (
+                    <section className="analysis-section always-visible">
+                        <div className="analysis-heading">
+                            <div>
+                                <div className="studio-eyebrow">FINAL RESULT</div>
+                                <h2>Input vs. Output</h2>
+                            </div>
+                            <div className="analysis-status">
+                                <span className="status-dot active" />
+                                {chain.length} step{chain.length !== 1 ? "s" : ""} applied
+                            </div>
                         </div>
 
-                        <div className="meter-grid">
-                            <LevelMeter
-                                label="INPUT LEVEL"
-                                stats={activeStats.input}
-                                clipped={0}
-                            />
-                            <LevelMeter
-                                label="OUTPUT LEVEL"
-                                stats={activeStats.output}
-                                clipped={stats.clipped}
-                            />
+                        <div className="analysis-grid">
+                            <StaticGraph title="INPUT · Time Domain" type="time" data={result.input.waveform} color="var(--input-accent)" />
+                            <StaticGraph title="OUTPUT · Time Domain" type="time" data={result.output.waveform} color="var(--output-accent)" />
+                            <StaticGraph title="INPUT · Frequency Domain" type="spectrum" data={result.input.spectrum} color="var(--input-accent)" />
+                            <StaticGraph title="OUTPUT · Frequency Domain" type="spectrum" data={result.output.spectrum} color="var(--output-accent)" />
                         </div>
-                    
+
+                        <div className="analysis-footer">
+                            <span>Peak output <strong>{Math.round(result.output.stats.peak * 100)}%</strong></span>
+                            <span>RMS output <strong>{Number.isFinite(result.output.stats.db) ? `${result.output.stats.db.toFixed(1)} dB` : "—"}</strong></span>
+                            <audio controls src={result.output.audio_url} />
+                        </div>
                     </section>
                 )}
 
-                <GraphModal
-                    graph={expandedGraphData}
-                    onClose={() => setExpandedGraph(null)}
-                    zoom={
-                        expandedGraphData
-                            ? getGraphView(expandedGraphData.key).zoom
-                            : 1
-                    }
-                    viewCenter={
-                        expandedGraphData
-                            ? getGraphView(expandedGraphData.key).center
-                            : 0.5
-                    }
-                    onZoomChange={(value) => {
-                        if (expandedGraphData) {
-                            updateGraphView(expandedGraphData.key, {
-                                zoom: value
-                            });
-                        }
-                    }}
-                    onCenterChange={(value) => {
-                        if (expandedGraphData) {
-                            updateGraphView(expandedGraphData.key, {
-                                center: value
-                            });
-                        }
-                    }}
-                    cursorProgress={currentProgress}
-                    duration={duration}
-                    playActive={
-                        isPlaying &&
-                        expandedGraphData?.playMode === playMode
-                    }
-                    onPlay={
-                        expandedGraphData?.playMode === "input"
-                            ? handlePlayInput
-                            : expandedGraphData?.playMode === "output"
-                              ? handlePlayOutput
-                              : null
-                    }
-                />
+                <section className="history-section">
+                    <div className="panel-label">RESULT HISTORY ({history.length}/{MAX_HISTORY})</div>
+                    <HistoryPanel history={history} compareIds={compareIds} onToggleCompare={toggleCompare} onRemove={removeHistoryEntry} />
+
+                    {compareEntries.length > 0 && (
+                        <div className="compare-grid">
+                            {compareEntries.map((entry) => (
+                                <div key={entry.id} className="compare-item">
+                                    <strong>{entry.chainLabel}</strong>
+                                    <StaticGraph title="Time Domain" type="time" data={entry.waveform} color="var(--output-accent)" height={110} />
+                                    <StaticGraph title="Frequency Domain" type="spectrum" data={entry.spectrum} color="var(--output-accent)" height={110} />
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </section>
             </div>
+
+            {convModalStepId && (
+                <ConvolutionModal
+                    onCancel={() => setConvModalStepId(null)}
+                    onConfirm={(file) => {
+                        setStepIr(convModalStepId, file);
+                        setConvModalStepId(null);
+                    }}
+                />
+            )}
         </main>
     );
 }
