@@ -201,12 +201,12 @@ export default function BirdDetector() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={status === "recording" || status === "analyzing"}>
                     ← DSP MODULES
                 </button>
-                <span>BONUS MODULE / BIRD SOUND DETECTOR</span>
+                <span>MODULE 07 / BIRD SOUND DETECTOR</span>
             </div>
 
             <div className="module-intro">
                 <h1>
-                    IDENTIFY A BIRD CALL <span>WITH DSP, NOT AI.</span>
+                    IDENTIFY A BIRD CALL <span>USING SIGNAL PROCESSING.</span>
                 </h1>
                 <p>
                     Record {RECORD_SECONDS} seconds of audio. The backend reduces it to six classic signal descriptors — energy,
@@ -262,7 +262,14 @@ export default function BirdDetector() {
                                         )}
                                     </h3>
                                     <small style={{ color: "rgba(255,255,255,.5)" }}>
-                                        similarity confidence: {detection.confidence}% · distance {detection.bestDistance} (threshold {detection.threshold})
+                                        {/* detection.bestDistance is the closest reference sample overall, which can
+                                            belong to a DIFFERENT species than the k-nearest-neighbour vote winner —
+                                            showing that number next to the winning species name was misleading, so
+                                            show that species' own nearest distance from allDistances instead, which
+                                            always matches the "All distances" line below. */}
+                                        similarity confidence: {detection.confidence}% · distance{" "}
+                                        {detection.allDistances?.[detection.rawSpecies] ?? detection.bestDistance}{" "}
+                                        (threshold {detection.threshold})
                                     </small>
                                 </div>
                             </div>

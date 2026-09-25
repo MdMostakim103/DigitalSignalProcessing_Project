@@ -319,6 +319,15 @@ async def detect_bird(file: UploadFile = File(...)):
     This is the only route in the app that behaves this way; every other
     /process-audio effect still persists its input/output because those
     are uploaded files the user is choosing to process, not live mic audio.
+
+    Trimming: this route passes the full decoded clip to classify_bird_sound
+    unmodified — the auto-trim to the loudest ~2s window (audio_fx.
+    extract_loudest_window) happens inside bird_features.extract_features,
+    which both this live path and scripts/generate_bird_references.py call.
+    Trimming there instead of here guarantees the live clip and every
+    reference recording are trimmed by the identical function with the
+    identical window, and it can't quietly drift out of sync between the
+    two call sites the way two separate copies of the same logic could.
     """
     raw_bytes = await file.read()
 

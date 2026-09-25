@@ -18,7 +18,7 @@ function getRoute() {
     if (hash === "#module/04") return "speechActivity";
     if (hash === "#module/05") return "spectralDetection";
     if (hash === "#module/06") return "voiceMorphing";
-    if (hash === "#module/BONUS") return "birdDetector";
+    if (hash === "#module/07") return "birdDetector";
 
     return "home";
 }
