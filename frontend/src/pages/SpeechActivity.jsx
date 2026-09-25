@@ -6,6 +6,33 @@ import EffectAnimator from "../components/Visualizations/EffectAnimator";
 import FrequencySpectrumAnimator from "../components/Visualizations/FrequencySpectrumAnimator";
 
 const THRESHOLD_RANGE = { min: 2, max: 60, step: 1 }; // percent of peak frame energy
+const ZCR_HZ_RANGE = { min: 200, max: 4000, step: 50 }; // approximate crossing rate, in Hz
+
+// zcr_ratio (crossings per sample) is not sample-rate-invariant: the same
+// physical audio measured at 8kHz reads ~5x higher than at 48kHz, because
+// the same real crossings get divided by a smaller per-frame sample count.
+// The invariant quantity is an approximate frequency: for a sinusoid at f Hz,
+// crossings-per-sample ~= 2f/sr, so f ~= zcr_ratio * sr / 2. Exposing the
+// slider in Hz (like the filter module's cutoff) means the same setting
+// means the same thing regardless of the uploaded file's sample rate.
+function zcrHzToRatio(hz, sampleRate) {
+    return (hz * 2) / Math.max(1, sampleRate);
+}
+
+const METHOD_CONTENT = {
+    energy: {
+        label: "SIMPLE (ENERGY)",
+        formula: (thresholdPct) =>
+            `enter: STE[n] > noise_floor + ${(thresholdPct / 100).toFixed(2)}·headroom   ·   stay active until STE[n] < half that`,
+        desc: "Break the signal into short frames and measure short-time energy (STE) per frame. The threshold isn't a flat fraction of the loudest frame — that's fragile, since one loud transient anywhere in the file would rescale it. Instead it's set relative to an estimated background noise floor, and hysteresis (a lower exit threshold than entry threshold) keeps a frame active through brief dips instead of flickering on and off.",
+    },
+    energy_zcr: {
+        label: "SOPHISTICATED (ENERGY + ZCR)",
+        formula: (thresholdPct, zcrHz) =>
+            `enter: STE[n] > noise_floor + ${(thresholdPct / 100).toFixed(2)}·headroom  AND  ZCR[n] < ${zcrHz} Hz   ·   stay active on energy alone`,
+        desc: "Energy alone can't tell loud speech from loud noise, so zero-crossing rate (ZCR) adds a second test: voiced speech crosses zero slowly, broadband/tonal noise crosses zero far more often at the same loudness. But testing BOTH on every single frame would reject real unvoiced speech too (s, f, sh are quiet and high-ZCR) — so ZCR only gates entering the active state; once triggered by a clear voiced onset, staying active only depends on energy, so a trailing unvoiced consonant isn't cut off mid-word.",
+    },
+};
 
 function formatBytes(bytes) {
     if (!bytes) return "";
@@ -65,8 +92,12 @@ export default function SpeechActivity() {
     const [showModal, setShowModal] = useState(false);
     const [modalDomain, setModalDomain] = useState("time");
 
+    const [method, setMethod] = useState("energy");
     const [thresholdPct, setThresholdPct] = useState(15);
+    const [zcrHz, setZcrHz] = useState(750);
     const [runThresholdPct, setRunThresholdPct] = useState(15);
+    const [runZcrHz, setRunZcrHz] = useState(750);
+    const [runMethod, setRunMethod] = useState("energy");
 
     // Each animation plays once on its first mount, then freezes fully
     // revealed. Bumping these forces a remount (a fresh play-through) only
@@ -131,11 +162,18 @@ export default function SpeechActivity() {
         resetVisualizerState();
     };
 
-    // Short-time energy can't be meaningfully hand-animated sample-by-sample
-    // in the browser — framing + RMS + thresholding over the whole signal is
-    // exactly what the backend already computed. So, same approach as the
-    // other modules: the animation plays back the backend's own reduced
-    // (frame-level or 180-point) series once the real result comes back.
+    const switchMethod = (nextMethod) => {
+        if (isProcessing) return;
+        setMethod(nextMethod);
+        resetVisualizerState();
+    };
+
+    // The framing + energy (+ ZCR) computation is simple enough to actually
+    // run live in the browser on a small number of samples — same approach
+    // ConvolutionAnimator uses for the real convolution sum. So the PROCESS
+    // tab computes its own reduced-scale version straight from inputBuffer;
+    // the backend separately computes the same thing at full sample-rate
+    // resolution for the real gated audio and the time/frequency tabs.
     const startProcessing = async () => {
         if (!inputFile) return;
 
@@ -148,6 +186,14 @@ export default function SpeechActivity() {
         setModalDomain("time");
         setShowVisualizer(true);
         setRunThresholdPct(thresholdPct);
+        setRunZcrHz(zcrHz);
+        setRunMethod(method);
+        // EffectAnimator/FrequencySpectrumAnimator remount naturally because
+        // backendResult flips null -> object on every run. ActivityAnimator
+        // no longer depends on backendResult at all (it computes live from
+        // inputBuffer, which never goes null between runs), so it needs an
+        // explicit key bump to restart the animation on a fresh run.
+        setProcessRunId((id) => id + 1);
 
         try {
             const result = await processAudio(
@@ -156,7 +202,17 @@ export default function SpeechActivity() {
                 2.0,
                 5, 5, 5,
                 null,
-                { threshold_ratio: thresholdPct / 100 }
+                {
+                    threshold_ratio: thresholdPct / 100,
+                    activity_method: method,
+                    // Sent as Hz, not a pre-computed ratio: the browser
+                    // resamples decoded audio to its own AudioContext rate,
+                    // which does not reliably match the file's real native
+                    // sample rate the backend actually loads and processes
+                    // at. The backend converts Hz -> ratio itself, against
+                    // the sr it truly used.
+                    zcr_threshold_hz: zcrHz,
+                }
             );
             setBackendResult(result);
         } catch (err) {
@@ -201,11 +257,19 @@ export default function SpeechActivity() {
                     FIND THE <span>ACTIVE</span><br />
                     REGIONS OF YOUR SIGNAL.
                 </h1>
-                <p>
-                    Break the signal into short frames, measure each frame's short-time energy (STE), and mark it
-                    active or quiet against a threshold — the same idea speech/activity detectors use before anything
-                    as complex as pitch or spectral analysis.
-                </p>
+                <p>{METHOD_CONTENT[method].desc}</p>
+
+                <div className="mode-selector-row">
+                    {Object.keys(METHOD_CONTENT).map((key) => (
+                        <button
+                            key={key}
+                            className={method === key ? "selected" : ""}
+                            onClick={() => switchMethod(key)}
+                        >
+                            {METHOD_CONTENT[key].label}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             <div className="module-workspace">
@@ -233,7 +297,7 @@ export default function SpeechActivity() {
                     <div className="param-control">
                         <div className="param-control-head">
                             <span>ACTIVITY THRESHOLD</span>
-                            <strong>{thresholdPct}% of peak</strong>
+                            <strong>{thresholdPct}% above noise floor</strong>
                         </div>
                         <input
                             type="range"
@@ -246,14 +310,35 @@ export default function SpeechActivity() {
                             style={{ "--pos": (thresholdPct - THRESHOLD_RANGE.min) / (THRESHOLD_RANGE.max - THRESHOLD_RANGE.min) }}
                             onChange={(e) => setThresholdPct(Number(e.target.value))}
                         />
-                        <small>Frames with energy above this fraction of the loudest frame are marked active; the rest are gated toward silence.</small>
+                        <small>How far above the estimated background noise level a frame must rise to trigger activity — not a fraction of the loudest frame, which a single transient could distort.</small>
                     </div>
+
+                    {method === "energy_zcr" && (
+                        <div className="param-control">
+                            <div className="param-control-head">
+                                <span>ZCR THRESHOLD</span>
+                                <strong>~{zcrHz} Hz</strong>
+                            </div>
+                            <input
+                                type="range"
+                                className="range-input"
+                                min={ZCR_HZ_RANGE.min}
+                                max={ZCR_HZ_RANGE.max}
+                                step={ZCR_HZ_RANGE.step}
+                                value={zcrHz}
+                                disabled={isProcessing}
+                                style={{ "--pos": (zcrHz - ZCR_HZ_RANGE.min) / (ZCR_HZ_RANGE.max - ZCR_HZ_RANGE.min) }}
+                                onChange={(e) => setZcrHz(Number(e.target.value))}
+                            />
+                            <small>Frames whose average crossing rate is ABOVE this (noise-like) are rejected even if loud enough. Expressed in Hz, not a raw ratio, so it means the same thing on any sample rate.</small>
+                        </div>
+                    )}
                 </div>
 
                 {warning && <div className="module-error" style={{ marginBottom: "20px" }}><strong>Wait!</strong> {warning}</div>}
 
                 <div className="math-visual" style={{ marginBottom: "24px" }}>
-                    <div className="math-formula"><span>active[n] = STE[n] &gt; {(thresholdPct / 100).toFixed(2)} · peak(STE)</span></div>
+                    <div className="math-formula"><span>{METHOD_CONTENT[method].formula(thresholdPct, zcrHz)}</span></div>
                 </div>
 
                 <div className="module-action-row" style={{ marginBottom: "8px" }}>
@@ -297,7 +382,7 @@ export default function SpeechActivity() {
                                 <div>
                                     <span className="control-kicker">ANIMATION ENGINE ({domain.toUpperCase()})</span>
                                     <h3>
-                                        {domain === "process" && "Framing + Short-Time Energy"}
+                                        {domain === "process" && (runMethod === "energy_zcr" ? "Framing + Energy + ZCR" : "Framing + Short-Time Energy")}
                                         {domain === "time" && "Gated Signal Playback"}
                                         {domain === "frequency" && "Frequency Spectrum Comparison"}
                                     </h3>
@@ -305,7 +390,7 @@ export default function SpeechActivity() {
                                         <small style={{ color: "rgba(255,255,255,.5)" }}>{activePct}% of frames marked active</small>
                                     )}
                                 </div>
-                                {backendResult && (
+                                {(backendResult || (domain === "process" && inputBuffer)) && (
                                     <div style={{ display: "flex", gap: "10px" }}>
                                         <button
                                             className="secondary-button"
@@ -317,18 +402,24 @@ export default function SpeechActivity() {
                                         >
                                             ⟳ REPLAY ANIMATION
                                         </button>
-                                        <button className="secondary-button" onClick={() => setShowModal(true)}>
-                                            OPEN RESULTS ↗
-                                        </button>
+                                        {backendResult && (
+                                            <button className="secondary-button" onClick={() => setShowModal(true)}>
+                                                OPEN RESULTS ↗
+                                            </button>
+                                        )}
                                     </div>
                                 )}
                             </div>
 
                             <div style={{ display: domain === "process" ? "block" : "none" }}>
-                                {backendResult ? (
+                                {inputBuffer ? (
                                     <ActivityAnimator
                                         key={`process-${processRunId}`}
-                                        activity={backendResult.activity}
+                                        inputBuffer={inputBuffer}
+                                        sampleRate={sampleRate}
+                                        method={runMethod}
+                                        energyThresholdRatio={runThresholdPct / 100}
+                                        zcrThreshold={zcrHzToRatio(runZcrHz, sampleRate)}
                                         loop={false}
                                         onComplete={() => setAnimationDone(true)}
                                     />

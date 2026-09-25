@@ -210,18 +210,11 @@ export default function FrequencyFiltering() {
     const switchFamily = (nextFamily) => {
         if (isProcessing) return;
         setFamily(nextFamily);
-        if (nextFamily === "ideal" && (bandType === "bandpass" || bandType === "bandstop")) {
-            setBandType("lowpass");
-            const d = BAND_DEFAULTS.lowpass;
-            setCutoff(Math.min(d.cutoff, cutoffMax));
-            setCutoff2(Math.min(d.cutoff2, cutoffMax));
-        }
         resetVisualizerState();
     };
 
     const switchBand = (nextBand) => {
         if (isProcessing) return;
-        if (isIdeal && (nextBand === "bandpass" || nextBand === "bandstop")) return;
         setBandType(nextBand);
         const d = BAND_DEFAULTS[nextBand];
         setCutoff(Math.min(d.cutoff, cutoffMax));
@@ -327,14 +320,10 @@ export default function FrequencyFiltering() {
                 </div>
                 <div className="mode-selector-row" style={{ marginTop: "2px" }}>
                     {BAND_ORDER.map((key) => {
-                        const disabled = isIdeal && (key === "bandpass" || key === "bandstop");
                         return (
                             <button
                                 key={key}
                                 className={bandType === key ? "selected" : ""}
-                                disabled={disabled}
-                                title={disabled ? "The ideal brick-wall filter only supports low-pass / high-pass" : undefined}
-                                style={disabled ? { opacity: 0.35, cursor: "not-allowed" } : undefined}
                                 onClick={() => switchBand(key)}
                             >
                                 {BAND_CONTENT[key].label}

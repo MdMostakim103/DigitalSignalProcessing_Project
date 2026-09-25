@@ -1349,7 +1349,7 @@ function AmplitudeDynamics() {
                         <label className={`upload-module-button ${processing ? "is-disabled" : ""}`}>
                             <input
                                 type="file"
-                                accept=".wav,audio/wav"
+                                accept="audio/*"
                                 disabled={processing}
                                 onChange={(event) => {
                                     const file = event.target.files?.[0];

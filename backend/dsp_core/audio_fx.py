@@ -119,11 +119,7 @@ def apply_noise_reduction(y: np.ndarray, sr: int) -> np.ndarray:
 BAND_TYPES = ("lowpass", "highpass", "bandpass", "bandstop")
 IIR_FAMILIES = ("butterworth", "chebyshev1", "chebyshev2", "elliptic", "bessel")
 
-# Fixed ripple/attenuation targets for the families that need them. Not
-# exposed as sliders — the point of offering these families is to let the
-# user compare their characteristic *shape* (equiripple passband, equiripple
-# stopband, sharpest-possible transition, linear phase) at a given order,
-# not to tune ripple depth by hand.
+
 PASSBAND_RIPPLE_DB = 1.0
 STOPBAND_ATTENUATION_DB = 40.0
 
@@ -166,6 +162,22 @@ def _design_coeffs(filter_family: str, band_type: str, sr: int, cutoff: float, c
     raise ValueError(f"Unknown filter_family: {filter_family}")
 
 
+def _ideal_mask(freqs: np.ndarray, band_type: str, cutoff: float, cutoff2: float) -> np.ndarray:
+    """Boolean brick-wall mask for the ideal filter family. All four band
+    types are just set membership on the frequency axis — no different in
+    kind from lowpass/highpass, only in how many cutoffs they need."""
+    if band_type == "lowpass":
+        return freqs <= cutoff
+    if band_type == "highpass":
+        return freqs >= cutoff
+    lo, hi = min(cutoff, cutoff2), max(cutoff, cutoff2)
+    if band_type == "bandpass":
+        return (freqs >= lo) & (freqs <= hi)
+    if band_type == "bandstop":
+        return (freqs < lo) | (freqs > hi)
+    raise ValueError(f"Unknown band_type: {band_type}")
+
+
 def apply_filter(
     y: np.ndarray,
     sr: int,
@@ -193,7 +205,7 @@ def apply_filter(
     elif filter_family == "ideal":
         spectrum = np.fft.rfft(y)
         freqs = np.fft.rfftfreq(len(y), d=1 / sr)
-        mask = (freqs <= cutoff) if band_type == "lowpass" else (freqs >= cutoff)
+        mask = _ideal_mask(freqs, band_type, cutoff, cutoff2)
         y_out = np.fft.irfft(spectrum * mask, n=len(y))
     else:
         raise ValueError(f"Unknown filter_family: {filter_family}")
@@ -226,7 +238,7 @@ def compute_filter_frequency_response(
         _, h = sosfreqz(sos, worN=freqs, fs=sr)
         magnitude = np.abs(h)
     elif filter_family == "ideal":
-        magnitude = (freqs <= cutoff).astype(float) if band_type == "lowpass" else (freqs >= cutoff).astype(float)
+        magnitude = _ideal_mask(freqs, band_type, cutoff, cutoff2).astype(float)
     else:
         raise ValueError(f"Unknown filter_family: {filter_family}")
 
@@ -257,42 +269,210 @@ def compute_short_time_energy(y: np.ndarray, sr: int, frame_ms: float = 25.0, ho
     return energies, frame_times, frame_len, hop_len
 
 
+def compute_zero_crossing_rate(y: np.ndarray, frame_len: int, hop_len: int) -> np.ndarray:
+    """Fraction of adjacent-sample sign flips per frame, using the SAME
+    framing (frame_len, hop_len) as compute_short_time_energy so energy and
+    ZCR line up frame-for-frame. Voiced speech is quasi-periodic around a low
+    fundamental, so it crosses zero slowly (low ZCR); broadband noise crosses
+    zero on almost every sample (high ZCR) even at the same loudness —
+    that's the extra discrimination energy alone doesn't have.
+    """
+    if len(y) <= frame_len:
+        n_frames = 1
+    else:
+        n_frames = 1 + (len(y) - frame_len) // hop_len
+
+    zcr = np.zeros(n_frames, dtype=np.float64)
+    for i in range(n_frames):
+        start = i * hop_len
+        frame = y[start:start + frame_len]
+        if frame.size < 2:
+            continue
+        signs = np.sign(frame)
+        signs[signs == 0] = 1.0
+        zcr[i] = np.mean(np.abs(np.diff(signs)) > 0)
+
+    return zcr
+
+
+def _estimate_noise_floor(energies: np.ndarray, percentile: float = 20.0) -> float:
+    """The Nth percentile of frame energies, not the max. A threshold set as
+    a fraction of the LOUDEST frame is fragile — one loud transient (a door
+    slam, a clipped syllable) rescales the threshold for the entire file. The
+    bottom percentile of frames is far more likely to be background noise/
+    silence in most recordings, and a single outlier there barely moves a
+    percentile the way it dominates a max."""
+    if energies.size == 0:
+        return 0.0
+    return float(np.percentile(energies, percentile))
+
+
+def _estimate_signal_level(energies: np.ndarray, percentile: float = 95.0) -> float:
+    """The high-percentile counterpart to _estimate_noise_floor: a robust
+    stand-in for 'how loud does this recording normally get', used instead
+    of the literal max(). A single 2ms transient can still double the true
+    peak; a 95th-percentile level barely moves, because it takes many loud
+    frames — not one — to shift a percentile. This is what actually closes
+    the threshold's sensitivity to one-off spikes; anchoring the noise floor
+    alone still leaves the top end fully exposed to whatever the single
+    loudest frame happens to be."""
+    if energies.size == 0:
+        return 0.0
+    return float(np.percentile(energies, percentile))
+
+
+def _apply_min_duration(active: np.ndarray, hop_len: int, sr: int, min_speech_ms: float, min_silence_ms: float) -> np.ndarray:
+    """Two clean-up passes over the boolean frame decisions: first bridge
+    short silence gaps (so a single frame that dips below threshold in the
+    middle of a word doesn't chop it in two), then discard speech islands
+    that are too short to be a real syllable (spurious single-frame blips).
+    This is what a per-frame threshold test alone can never provide — it has
+    no notion of "this is happening in the middle of an ongoing word."
+    """
+    n = active.size
+    if n == 0:
+        return active
+    hop_seconds = hop_len / sr
+    min_speech_frames = max(1, int(round(min_speech_ms / 1000 / hop_seconds)))
+    min_silence_frames = max(1, int(round(min_silence_ms / 1000 / hop_seconds)))
+
+    out = active.copy()
+
+    i = 0
+    while i < n:
+        if not out[i]:
+            j = i
+            while j < n and not out[j]:
+                j += 1
+            gap_len = j - i
+            flanked = i > 0 and j < n
+            if flanked and gap_len < min_silence_frames:
+                out[i:j] = True
+            i = j
+        else:
+            i += 1
+
+    i = 0
+    while i < n:
+        if out[i]:
+            j = i
+            while j < n and out[j]:
+                j += 1
+            if (j - i) < min_speech_frames:
+                out[i:j] = False
+            i = j
+        else:
+            i += 1
+
+    return out
+
+
+def _activity_gain_from_frames(active: np.ndarray, hop_len: int, total_len: int, fade_ms: float, sr: int) -> np.ndarray:
+    """Frame decisions -> a per-sample gain envelope. Earlier this convolved
+    with a RECTANGULAR (boxcar) kernel, which is a poor choice: a boxcar's
+    frequency response has sidelobes and its output ramps linearly with a
+    sharp kink at both ends, not a smooth curve. A Hann (raised-cosine)
+    kernel is the standard fix — it has no sidelobes and produces a genuinely
+    smooth S-shaped fade in and out, the same window shape used everywhere
+    else in this app's own FFT analysis (Modules 2, 5, 6)."""
+    gain = np.repeat(active.astype(np.float32), hop_len)
+    if gain.size < total_len:
+        gain = np.pad(gain, (0, total_len - gain.size), mode="edge")
+    gain = gain[:total_len]
+
+    fade_len = max(1, int(sr * fade_ms / 1000))
+    if fade_len > 1 and gain.size:
+        kernel = np.hanning(fade_len).astype(np.float32)
+        kernel_sum = kernel.sum()
+        if kernel_sum > 0:
+            kernel /= kernel_sum
+            gain = np.convolve(gain, kernel, mode="same")
+
+    return gain
+
+
 def apply_activity_gate(
     y: np.ndarray,
     sr: int,
     frame_ms: float = 25.0,
     hop_ms: float = 10.0,
-    threshold_ratio: float = 0.15,
-    smooth_ms: float = 15.0,
+    method: str = "energy",
+    energy_threshold_ratio: float = 0.15,
+    zcr_threshold_hz: float = 700.0,
+    hysteresis_ratio: float = 0.5,
+    min_speech_ms: float = 60.0,
+    min_silence_ms: float = 60.0,
+    fade_ms: float = 15.0,
 ):
-    """Frame the signal, measure short-time energy per frame, classify each
-    frame as 'active' (above threshold_ratio of the peak frame energy) or
-    'quiet', then gate the quiet regions down toward silence. The mask is
-    smoothed before multiplying so gating doesn't produce hard clicks at
-    the active/quiet boundaries.
+    """Voice activity detection as a small classical pipeline, not a single
+    threshold test:
+
+      framing -> energy (+ ZCR) -> noise-floor-relative hysteresis -> minimum
+      duration cleanup -> smooth gain -> gated audio
+
+    Two things a bare "energy > threshold_ratio * peak" test gets wrong, both
+    fixed here:
+
+    1. A single loud transient sets the scale for the WHOLE file (the peak).
+       The threshold is instead set relative to an estimated noise floor
+       (a low percentile of frame energies) blended with the peak, so it
+       tracks the actual quiet/loud contrast in the recording rather than
+       one outlier sample.
+
+    2. A single strict per-frame test rejects unvoiced speech (s, f, sh, and
+       stop-consonant bursts) outright, because those are quiet AND
+       high-ZCR — they would fail an energy+ZCR AND-test even though they
+       are real speech, not noise. Fixed with HYSTERESIS: ZCR only gates
+       *entering* the active state (so pure noise can't trigger a false
+       onset), while *staying* active only requires clearing a lower exit
+       threshold on energy. A trailing unvoiced consonant right after a
+       voiced vowel — quieter, higher ZCR — keeps its already-active state
+       instead of being cut off mid-word.
+
+    method="energy" skips the ZCR gate entirely (the "simple" mode); both
+    modes get the noise-floor-relative hysteresis, minimum-duration cleanup,
+    and Hann-smoothed gain.
     """
     energies, frame_times, frame_len, hop_len = compute_short_time_energy(y, sr, frame_ms, hop_ms)
+
+    noise_floor = _estimate_noise_floor(energies)
     peak = float(np.max(energies)) if energies.size else 0.0
-    threshold = peak * threshold_ratio
-    active = energies > threshold
+    # The threshold is anchored to a robust signal level, not the literal
+    # peak: a single loud transient can double the true max, but barely
+    # shifts a 95th-percentile estimate. `peak` itself is still reported
+    # (e.g. for display) as the real maximum.
+    signal_level = _estimate_signal_level(energies)
+    headroom = max(0.0, signal_level - noise_floor)
+    enter_threshold = noise_floor + energy_threshold_ratio * headroom
+    exit_threshold = noise_floor + energy_threshold_ratio * hysteresis_ratio * headroom
 
-    gain = np.repeat(active.astype(np.float32), hop_len)
-    if gain.size < len(y):
-        gain = np.pad(gain, (0, len(y) - gain.size), mode="edge")
-    gain = gain[:len(y)]
+    use_zcr = method == "energy_zcr"
+    zcr = compute_zero_crossing_rate(y, frame_len, hop_len) if use_zcr else None
+    zcr_threshold_ratio = (zcr_threshold_hz * 2 / sr) if use_zcr else None
 
-    smooth_len = max(1, int(sr * smooth_ms / 1000))
-    if smooth_len > 1 and gain.size:
-        kernel = np.ones(smooth_len, dtype=np.float32) / smooth_len
-        gain = np.convolve(gain, kernel, mode="same")
+    n = energies.size
+    active = np.zeros(n, dtype=bool)
+    state = False
+    for i in range(n):
+        if not state:
+            enters = energies[i] > enter_threshold
+            if use_zcr:
+                enters = enters and zcr[i] < zcr_threshold_ratio
+            state = bool(enters)
+        else:
+            state = bool(energies[i] >= exit_threshold)
+        active[i] = state
 
+    active = _apply_min_duration(active, hop_len, sr, min_speech_ms, min_silence_ms)
+
+    gain = _activity_gain_from_frames(active, hop_len, len(y), fade_ms, sr)
     y_out = y * gain
 
     peak_out = np.max(np.abs(y_out))
     if peak_out > 0:
         y_out = y_out / peak_out
 
-    return y_out, energies, frame_times, active, threshold, peak
+    return y_out, energies, zcr, frame_times, active, enter_threshold, exit_threshold, noise_floor, peak, zcr_threshold_ratio
 
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]

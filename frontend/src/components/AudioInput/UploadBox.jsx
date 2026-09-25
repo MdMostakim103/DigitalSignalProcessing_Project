@@ -49,7 +49,7 @@ function UploadBox({ onAudioSelect }) {
             <input
                 ref={fileInputRef}
                 type="file"
-                accept=".wav,audio/wav"
+                accept="audio/*"
                 onChange={handleFileChange}
                 hidden
             />

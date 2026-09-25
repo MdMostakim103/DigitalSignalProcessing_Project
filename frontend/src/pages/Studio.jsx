@@ -212,6 +212,13 @@ function FilterMiniPreview({ params, sampleRate }) {
 function StaticGraph({ title, type, data, color = "var(--input-accent)", height = 150 }) {
     const canvasRef = useRef(null);
 
+    // Resolve CSS variable colours once so we can use them in gradients.
+    const resolveColor = (cssColor) => {
+        if (!cssColor.startsWith("var(")) return cssColor;
+        const varName = cssColor.slice(4, -1).trim();
+        return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || "#72e6ff";
+    };
+
     const draw = useCallback(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -226,21 +233,40 @@ function StaticGraph({ title, type, data, color = "var(--input-accent)", height 
         const ctx = canvas.getContext("2d");
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, width, h);
-        ctx.fillStyle = "rgba(255,255,255,0.035)";
+
+        // Dark purple background matching the project palette
+        ctx.fillStyle = "rgba(25, 27, 95, 0.80)";
         ctx.fillRect(0, 0, width, h);
 
-        const left = 10;
-        const right = width - 10;
-        const top = 10;
-        const bottom = h - 10;
+        const left = 12;
+        const right = width - 12;
+        const top = 12;
+        const bottom = h - 12;
         const gw = right - left;
         const gh = bottom - top;
 
-        ctx.strokeStyle = "rgba(255,255,255,0.12)";
+        // Subtle horizontal grid lines
+        ctx.strokeStyle = "rgba(255,255,255,0.08)";
+        ctx.lineWidth = 1;
+        for (let g = 0; g <= 4; g++) {
+            const y = top + (g / 4) * gh;
+            ctx.beginPath();
+            ctx.moveTo(left, y);
+            ctx.lineTo(right, y);
+            ctx.stroke();
+        }
+
+        // Centre line — more visible
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
         ctx.beginPath();
         ctx.moveTo(left, top + gh / 2);
         ctx.lineTo(right, top + gh / 2);
         ctx.stroke();
+        ctx.setLineDash([]);
+
+        const resolvedColor = resolveColor(color);
 
         if (type === "time") {
             const values = data || [];
@@ -250,31 +276,69 @@ function StaticGraph({ title, type, data, color = "var(--input-accent)", height 
             for (let i = 0; i < values.length; i += 1) peak = Math.max(peak, Math.abs(values[i]));
             const scale = peak > 0 ? peak : 1;
 
+            const midY = top + gh / 2;
+
+            // Build path
+            const points = values.map((v, i) => ({
+                x: left + (i / Math.max(1, values.length - 1)) * gw,
+                y: midY - (v / scale) * (gh / 2) * 0.88,
+            }));
+
+            // Gradient fill under the waveform
+            const fillGrad = ctx.createLinearGradient(0, top, 0, bottom);
+            fillGrad.addColorStop(0, `${resolvedColor}55`);
+            fillGrad.addColorStop(0.5, `${resolvedColor}22`);
+            fillGrad.addColorStop(1, `${resolvedColor}05`);
+
             ctx.beginPath();
-            values.forEach((v, i) => {
-                const x = left + (i / Math.max(1, values.length - 1)) * gw;
-                const y = top + gh / 2 - (v / scale) * (gh / 2) * 0.92;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            });
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 1.8;
+            ctx.moveTo(points[0].x, midY);
+            points.forEach((p) => ctx.lineTo(p.x, p.y));
+            ctx.lineTo(points[points.length - 1].x, midY);
+            ctx.closePath();
+            ctx.fillStyle = fillGrad;
+            ctx.fill();
+
+            // Stroke line on top
+            const lineGrad = ctx.createLinearGradient(left, 0, right, 0);
+            lineGrad.addColorStop(0, `${resolvedColor}bb`);
+            lineGrad.addColorStop(0.5, resolvedColor);
+            lineGrad.addColorStop(1, `${resolvedColor}bb`);
+
+            ctx.beginPath();
+            points.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+            ctx.strokeStyle = lineGrad;
+            ctx.lineWidth = 2.5;
             ctx.lineJoin = "round";
+            ctx.lineCap = "round";
             ctx.stroke();
         } else {
             const magnitude = data?.magnitude || [];
             if (!magnitude.length) return;
 
             const displayMax = data.displayMax || Math.max(...magnitude, 1e-9);
-            const barWidth = gw / magnitude.length;
+            const barCount = magnitude.length;
+            const barWidth = Math.max(2, gw / barCount);
+            const gap = barWidth > 4 ? 1 : 0;
 
             magnitude.forEach((m, i) => {
                 const ratio = clamp(m / (displayMax || 1), 0, 1);
-                const barHeight = ratio * gh;
-                const x = left + i * barWidth;
-                ctx.globalAlpha = 0.35 + ratio * 0.65;
-                ctx.fillStyle = color;
-                ctx.fillRect(x, bottom - barHeight, Math.max(1, barWidth - 1), barHeight);
+                if (ratio < 0.002) return;
+                const barHeight = Math.max(2, ratio * gh);
+                const x = left + i * (gw / barCount);
+                const y = bottom - barHeight;
+
+                const barGrad = ctx.createLinearGradient(0, y, 0, bottom);
+                barGrad.addColorStop(0, resolvedColor);
+                barGrad.addColorStop(1, `${resolvedColor}55`);
+
+                ctx.globalAlpha = 0.55 + ratio * 0.45;
+                ctx.fillStyle = barGrad;
+                ctx.fillRect(x, y, Math.max(1, barWidth - gap), barHeight);
+
+                // Bright cap on top of each bar
+                ctx.globalAlpha = 0.9;
+                ctx.fillStyle = resolvedColor;
+                ctx.fillRect(x, y, Math.max(1, barWidth - gap), Math.min(2, barHeight));
             });
             ctx.globalAlpha = 1;
         }
@@ -466,6 +530,92 @@ function ChainStepCard({
     );
 }
 
+function CustomAudioPlayer({ src, compact = false }) {
+    const audioRef = useRef(null);
+    const [playing, setPlaying] = useState(false);
+    const [muted, setMuted] = useState(false);
+    const [progress, setProgress] = useState(0);
+    const [duration, setDuration] = useState(0);
+
+    useEffect(() => {
+        const audio = audioRef.current;
+        if (!audio) return;
+        setPlaying(false);
+        setProgress(0);
+        audio.pause();
+        audio.currentTime = 0;
+    }, [src]);
+
+    const togglePlay = () => {
+        const audio = audioRef.current;
+        if (!audio) return;
+        if (playing) { audio.pause(); setPlaying(false); }
+        else { audio.play().then(() => setPlaying(true)).catch(() => {}); }
+    };
+
+    const toggleMute = () => {
+        const audio = audioRef.current;
+        if (!audio) return;
+        audio.muted = !muted;
+        setMuted(!muted);
+    };
+
+    const handleTimeUpdate = () => {
+        const a = audioRef.current;
+        if (a && a.duration) setProgress(a.currentTime / a.duration);
+    };
+
+    const handleLoadedMetadata = () => setDuration(audioRef.current?.duration || 0);
+    const handleEnded = () => setPlaying(false);
+
+    const handleSeek = (e) => {
+        const audio = audioRef.current;
+        if (!audio || !audio.duration) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        audio.currentTime = ratio * audio.duration;
+        setProgress(ratio);
+    };
+
+    const fmt = (t) => {
+        if (!Number.isFinite(t)) return "0:00";
+        const m = Math.floor(t / 60);
+        const s = Math.floor(t % 60).toString().padStart(2, "0");
+        return `${m}:${s}`;
+    };
+
+    return (
+        <div className={`custom-player${compact ? " custom-player--compact" : ""}`}>
+            <audio
+                ref={audioRef}
+                src={src}
+                onTimeUpdate={handleTimeUpdate}
+                onLoadedMetadata={handleLoadedMetadata}
+                onEnded={handleEnded}
+            />
+            <button type="button" className="cp-btn cp-play" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
+                {playing
+                    ? <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><rect x="2" y="2" width="4" height="12" rx="1"/><rect x="10" y="2" width="4" height="12" rx="1"/></svg>
+                    : <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M3 2l11 6-11 6z"/></svg>
+                }
+            </button>
+            <div className="cp-track" onClick={handleSeek} role="slider" aria-label="Seek">
+                <div className="cp-fill" style={{ width: `${progress * 100}%` }} />
+                <div className="cp-thumb" style={{ left: `${progress * 100}%` }} />
+            </div>
+            {!compact && (
+                <span className="cp-time">{fmt(duration * progress)} / {fmt(duration)}</span>
+            )}
+            <button type="button" className="cp-btn cp-mute" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"}>
+                {muted
+                    ? <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><path d="M9 2L5 6H2v4h3l4 4V2zm4.5 3.5l-4 4m4-4l-4 4" strokeWidth="1.5" stroke="currentColor" strokeLinecap="round"/><line x1="11" y1="5" x2="15" y2="9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="15" y1="5" x2="11" y2="9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                    : <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><path d="M9 2L5 6H2v4h3l4 4V2z"/><path d="M11.5 5.5a4 4 0 0 1 0 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><path d="M13.5 3.5a7 7 0 0 1 0 9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                }
+            </button>
+        </div>
+    );
+}
+
 function ConvolutionModal({ onConfirm, onCancel }) {
     const [file, setFile] = useState(null);
     const inputRef = useRef(null);
@@ -519,7 +669,7 @@ function HistoryPanel({ history, compareIds, onToggleCompare, onRemove }) {
                         </div>
                     </label>
                     <div className="history-item__actions">
-                        <audio controls src={entry.audioUrl} />
+                        <CustomAudioPlayer src={entry.audioUrl} compact />
                         <button type="button" onClick={() => onRemove(entry.id)} aria-label="Remove from history">✕</button>
                     </div>
                 </div>
@@ -756,7 +906,7 @@ export default function Studio() {
                                 </div>
                                 <button type="button" className="secondary-button" onClick={() => fileInputRef.current?.click()}>Replace</button>
                             </div>
-                            <audio controls src={audioUrl} className="native-player" />
+                            <CustomAudioPlayer src={audioUrl} />
                         </>
                     )}
                 </section>
@@ -837,7 +987,7 @@ export default function Studio() {
                         <div className="analysis-footer">
                             <span>Peak output <strong>{Math.round(result.output.stats.peak * 100)}%</strong></span>
                             <span>RMS output <strong>{Number.isFinite(result.output.stats.db) ? `${result.output.stats.db.toFixed(1)} dB` : "—"}</strong></span>
-                            <audio controls src={result.output.audio_url} />
+                            <CustomAudioPlayer src={result.output.audio_url} />
                         </div>
                     </section>
                 )}

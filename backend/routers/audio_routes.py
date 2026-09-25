@@ -55,6 +55,8 @@ async def process_audio(
     cutoff2: float = Form(4000.0),
     order: int = Form(4),
     threshold_ratio: float = Form(0.15),
+    activity_method: str = Form("energy"),
+    zcr_threshold_hz: float = Form(700.0),
     pitch_fmin: float = Form(50.0),
     pitch_fmax: float = Form(2000.0),
     morph_mode: str = Form("pitch"),
@@ -108,8 +110,21 @@ async def process_audio(
         resp_freqs, resp_mag = compute_filter_frequency_response(filter_family, band_type, sr, cutoff, cutoff2, order)
         filter_response_data = filter_response_bars(resp_freqs, resp_mag, sr)
     elif effect == "activity":
-        y_modified, energies, frame_times, active, threshold, peak = apply_activity_gate(y, sr, threshold_ratio=threshold_ratio)
-        activity_data = build_activity_data(energies, frame_times, active, threshold, peak)
+        # zcr_threshold_hz is converted to a ratio INSIDE apply_activity_gate,
+        # against the REAL sr librosa just loaded — not client-side, where the
+        # browser's AudioContext may have silently resampled the decoded
+        # buffer to a different rate than the file's actual native one.
+        y_modified, energies, zcr, frame_times, active, enter_thr, exit_thr, noise_floor, peak, zcr_thr = apply_activity_gate(
+            y, sr,
+            method=activity_method,
+            energy_threshold_ratio=threshold_ratio,
+            zcr_threshold_hz=zcr_threshold_hz,
+        )
+        activity_data = build_activity_data(
+            energies, frame_times, active, enter_thr, peak,
+            zcr=zcr, zcr_threshold=zcr_thr,
+            exit_threshold=exit_thr, noise_floor=noise_floor,
+        )
     elif effect == "pitch":
         peak_freq, spectrum, freqs = detect_dominant_frequency(y, sr, fmin=pitch_fmin, fmax=pitch_fmax)
         note = freq_to_note(peak_freq)
@@ -205,10 +220,17 @@ def _run_chain_step(op_type: str, y: np.ndarray, sr: int, params: dict, ir_wave:
         y_out = apply_noise_reduction(y, sr)
 
     elif op_type == "activity":
-        y_out, energies, frame_times, active, threshold, peak = apply_activity_gate(
-            y, sr, threshold_ratio=float(params.get("threshold_ratio", 0.15)),
+        y_out, energies, zcr, frame_times, active, enter_thr, exit_thr, noise_floor, peak, zcr_thr = apply_activity_gate(
+            y, sr,
+            method=params.get("activity_method", "energy"),
+            energy_threshold_ratio=float(params.get("threshold_ratio", 0.15)),
+            zcr_threshold_hz=float(params.get("zcr_threshold_hz", 700.0)),
         )
-        extra["activity"] = build_activity_data(energies, frame_times, active, threshold, peak)
+        extra["activity"] = build_activity_data(
+            energies, frame_times, active, enter_thr, peak,
+            zcr=zcr, zcr_threshold=zcr_thr,
+            exit_threshold=exit_thr, noise_floor=noise_floor,
+        )
 
     elif op_type == "morph":
         y_out, _ = apply_voice_morph(

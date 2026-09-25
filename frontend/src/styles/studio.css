@@ -24,7 +24,7 @@
     --studio-accent-soft: rgba(255, 178, 26, 0.18);
     --input-accent: #72e6ff;
     --output-accent: #ffc05c;
-    --graph-canvas: rgba(48, 50, 137, 0.64);
+    --graph-canvas: rgba(37, 39, 118, 0.70);
     --shadow: 0 24px 60px rgba(31, 32, 100, 0.18);
 }
 
@@ -768,8 +768,9 @@
 .graph-card {
     min-width: 0;
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.065);
-    box-shadow: none;
+    background: rgba(37, 39, 118, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 6px 24px rgba(0,0,0,0.20);
 }
 
 .graph-card__header {
@@ -864,7 +865,7 @@
 }
 
 .graph-canvas {
-    --graph-canvas: rgba(48, 50, 137, 0.64);
+    --graph-canvas: rgba(37, 39, 118, 0.70);
     display: block;
     width: 100%;
     height: 100%;
@@ -889,11 +890,21 @@
 .analysis-footer {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: 14px;
-    margin-top: 10px;
-    padding: 0 2px;
+    margin-top: 12px;
+    padding: 12px 14px;
+    background: rgba(0,0,0,0.18);
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.08);
     color: var(--studio-faint);
     font-size: 9px;
+}
+
+.analysis-footer .custom-player {
+    flex: 0 0 auto;
+    max-width: 320px;
+    margin-top: 0;
 }
 
 .analysis-footer strong {
@@ -986,9 +997,95 @@
    CHAIN BUILDER
    ========================================================= */
 
-.native-player {
+/* ─── Custom audio player ────────────────────────────────────── */
+.custom-player {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: rgba(55, 57, 160, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
     width: 100%;
     margin-top: 10px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+}
+
+.custom-player--compact {
+    padding: 6px 10px;
+    gap: 8px;
+    margin-top: 0;
+}
+
+.cp-btn {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.20);
+    background: rgba(114, 230, 255, 0.16);
+    color: #fff;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.custom-player--compact .cp-btn {
+    width: 26px;
+    height: 26px;
+}
+
+.cp-btn:hover {
+    background: rgba(114, 230, 255, 0.30);
+    border-color: rgba(114, 230, 255, 0.45);
+    transform: scale(1.06);
+}
+
+.cp-play {
+    background: rgba(114, 230, 255, 0.20);
+}
+
+.cp-track {
+    flex: 1;
+    position: relative;
+    height: 5px;
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    cursor: pointer;
+    overflow: visible;
+}
+
+.cp-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, #72e6ff, #ffc05c);
+    border-radius: 999px;
+    pointer-events: none;
+    transition: width 0.05s linear;
+}
+
+.cp-thumb {
+    position: absolute;
+    top: 50%;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid #72e6ff;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    box-shadow: 0 0 6px rgba(114, 230, 255, 0.6);
+    transition: left 0.05s linear;
+}
+
+.cp-time {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.60);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    letter-spacing: 0.02em;
 }
 
 .chain-builder {
@@ -1270,22 +1367,29 @@
 }
 
 .stage-graph {
-    background: var(--graph-canvas);
+    background: rgba(37, 39, 118, 0.55);
     border-radius: 10px;
-    padding: 6px;
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 4px 16px rgba(0,0,0,0.18);
+    overflow: hidden;
 }
 
 .stage-graph__title {
-    font-size: 10.5px;
-    color: var(--studio-faint);
-    margin-bottom: 4px;
-    padding-left: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: rgba(255,255,255,0.55);
+    margin-bottom: 6px;
+    padding-left: 2px;
+    text-transform: uppercase;
 }
 
 .stage-graph__canvas {
     width: 100%;
     display: block;
     border-radius: 6px;
+    background: rgba(25, 27, 95, 0.80);
 }
 
 .chain-error {
@@ -1424,9 +1528,9 @@
     gap: 10px;
 }
 
-.history-item__actions audio {
-    height: 32px;
-    max-width: 220px;
+.history-item__actions .custom-player {
+    max-width: 300px;
+    flex: 1;
 }
 
 .history-item__actions button {

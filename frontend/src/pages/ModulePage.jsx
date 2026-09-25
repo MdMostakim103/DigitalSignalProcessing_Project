@@ -228,7 +228,7 @@ function ModulePage({ moduleNumber }) {
                     <div className="module-input-row">
                         <label className="module-file">
                             <span>{fileName || "Optional: choose a WAV file"}</span>
-                            <input type="file" accept=".wav,audio/wav" onChange={chooseFile} />
+                            <input type="file" accept="audio/*" onChange={chooseFile} />
                         </label>
                         <button className="module-run" type="button" onClick={play}>
                             {running ? "PROCESSING…" : "PLAY THE PROCESS"}

@@ -7,9 +7,9 @@ from pathlib import Path
 
 
 def generate_comparison_plot(
-    y_input: np.ndarray,
-    y_output: np.ndarray,
-    sr: int,
+    y_input: np.ndarray ,
+    y_output: np.ndarray ,
+    sr: int ,
     filename: str,
     start_sample: int = None,
     end_sample: int = None,
@@ -140,24 +140,48 @@ def build_activity_data(
     threshold: float,
     peak: float,
     points: int = 180,
+    zcr: np.ndarray = None,
+    zcr_threshold: float = None,
+    exit_threshold: float = None,
+    noise_floor: float = None,
 ) -> dict:
     """Bucket per-frame short-time energy + active/quiet flags into a fixed
     number of display points — same idea as _downsample_time, but carrying
     the boolean activity flag alongside the energy curve so the frontend can
-    highlight active vs quiet regions directly."""
+    highlight active vs quiet regions directly.
+
+    zcr/zcr_threshold, when given (the energy+ZCR method), are binned the
+    same way and returned alongside — this is stats/reference data for the
+    finished result, not what drives the process animation, which computes
+    its own small-scale version live from the raw client-side buffer.
+
+    exit_threshold/noise_floor describe the hysteresis: `threshold` is the
+    (higher) enter threshold, `exit_threshold` the lower one a frame must
+    drop below to leave the active state, and `noise_floor` is the estimated
+    background level both are measured relative to."""
     energies = np.asarray(energies, dtype=np.float32)
     active = np.asarray(active, dtype=bool)
     frame_times = np.asarray(frame_times, dtype=np.float32)
     n = energies.size
 
     if n == 0:
-        return {"energy": [], "active": [], "time": [], "threshold": 0.0, "peak": 0.0}
+        empty = {"energy": [], "active": [], "time": [], "threshold": 0.0, "peak": 0.0}
+        if zcr is not None:
+            empty["zcr"] = []
+            empty["zcrThreshold"] = 0.0
+        if exit_threshold is not None:
+            empty["exitThreshold"] = 0.0
+        if noise_floor is not None:
+            empty["noiseFloor"] = 0.0
+        return empty
 
     count = min(points, n)
     edges = np.linspace(0, n, count + 1, dtype=np.int64)
     energy_ds = np.zeros(count, dtype=np.float32)
     active_ds = np.zeros(count, dtype=bool)
     time_ds = np.zeros(count, dtype=np.float32)
+    zcr_ds = np.zeros(count, dtype=np.float32) if zcr is not None else None
+    zcr_arr = np.asarray(zcr, dtype=np.float32) if zcr is not None else None
     for i in range(count):
         lo, hi = edges[i], max(edges[i] + 1, edges[i + 1])
         chunk_e = energies[lo:hi]
@@ -165,14 +189,25 @@ def build_activity_data(
         energy_ds[i] = float(np.mean(chunk_e)) if chunk_e.size else 0.0
         active_ds[i] = bool(np.any(chunk_a)) if chunk_a.size else False
         time_ds[i] = float(frame_times[min(lo, n - 1)])
+        if zcr_ds is not None:
+            chunk_z = zcr_arr[lo:hi]
+            zcr_ds[i] = float(np.mean(chunk_z)) if chunk_z.size else 0.0
 
-    return {
+    result = {
         "energy": energy_ds.tolist(),
         "active": active_ds.tolist(),
         "time": time_ds.tolist(),
         "threshold": float(threshold),
         "peak": float(peak),
     }
+    if zcr_ds is not None:
+        result["zcr"] = zcr_ds.tolist()
+        result["zcrThreshold"] = float(zcr_threshold or 0.0)
+    if exit_threshold is not None:
+        result["exitThreshold"] = float(exit_threshold)
+    if noise_floor is not None:
+        result["noiseFloor"] = float(noise_floor)
+    return result
 
 
 def build_pitch_data(
