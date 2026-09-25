@@ -6,10 +6,18 @@ Why synthesized calls by default: the project started with no bird-audio
 dataset, external downloads weren't reachable from the grading environment,
 and licensing real recordings under time pressure was risky. Each
 synthetic "species" is built from a distinct, documented DSP synthesis
-recipe (a sustained low tone, a fast tonal trill, a broadband noisy caw, a
-smooth coo, a rising/falling melodic sweep) so the resulting feature
-vectors are genuinely different from each other in a way that maps onto
-real acoustic differences between those call types.
+recipe (a broadband noisy caw, a rising/falling melodic sweep, a sustained
+low tone) so the resulting feature vectors are genuinely different from
+each other in a way that maps onto real acoustic differences between those
+call types. Species live/died: Sparrow and Dove were dropped after a
+leave-one-out accuracy check (scripts/evaluate_bird_accuracy.py) showed
+Dove absorbed most of the cross-species confusion and Sparrow overlapped
+heavily with it too — the remaining three (Crow/Robin/Owl) are the most
+acoustically distinct combination found (79.4% leave-one-out accuracy vs.
+58.6% with all five). To add a species back, add its make_<species>
+function and an entry in SPECIES_GENERATORS below — nothing else in the
+detection pipeline (bird_detector.py, bird_features.py, the frontend) is
+hardcoded to any particular species count or name.
 
 Real recordings: for each species, if static/bird_samples/<species>/
 contains any audio files (.wav/.mp3/.flac/.ogg, any filename), those are
@@ -70,18 +78,6 @@ def _silence_pad(signal: np.ndarray, sr: int, total_seconds: float) -> np.ndarra
     return np.concatenate([lead_noise, signal, trail_noise])
 
 
-def make_sparrow(jitter: float) -> np.ndarray:
-    """Fast, high-pitched tonal trill: short chirps repeated quickly."""
-    chirp_hz = 4200 + jitter * 400
-    n_chirps = 6
-    chirp_len = int(SR * 0.12)
-    t = np.arange(chirp_len) / SR
-    chirp = 0.6 * np.sin(2 * np.pi * chirp_hz * t) * np.exp(-t * 18)
-    gap = np.zeros(int(SR * 0.08))
-    call = np.concatenate([np.concatenate([chirp, gap]) for _ in range(n_chirps)])
-    return _silence_pad(_fade(call, SR), SR, DURATION_SECONDS)
-
-
 def make_crow(jitter: float) -> np.ndarray:
     """Low, harsh, broadband 'caw' — built from filtered noise plus a
     low fundamental, giving it a noisy/buzzy spectrum unlike a pure tone."""
@@ -96,19 +92,6 @@ def make_crow(jitter: float) -> np.ndarray:
     caw = (0.5 * tone + 0.5 * noise) * envelope
     gap = np.zeros(int(SR * 0.3))
     call = np.concatenate([np.concatenate([caw, gap]) for _ in range(n_caws)])
-    return _silence_pad(_fade(call, SR), SR, DURATION_SECONDS)
-
-
-def make_dove(jitter: float) -> np.ndarray:
-    """Smooth, low-frequency, near-pure-tone 'coo'."""
-    coo_hz = 380 + jitter * 30
-    n_coos = 2
-    coo_len = int(SR * 0.6)
-    t = np.arange(coo_len) / SR
-    vibrato = 1 + 0.01 * np.sin(2 * np.pi * 5 * t)
-    coo = 0.5 * np.sin(2 * np.pi * coo_hz * vibrato * t) * np.hanning(coo_len)
-    gap = np.zeros(int(SR * 0.25))
-    call = np.concatenate([np.concatenate([coo, gap]) for _ in range(n_coos)])
     return _silence_pad(_fade(call, SR), SR, DURATION_SECONDS)
 
 
@@ -141,9 +124,7 @@ def make_owl(jitter: float) -> np.ndarray:
 
 
 SPECIES_GENERATORS = {
-    "Sparrow": make_sparrow,
     "Crow": make_crow,
-    "Dove": make_dove,
     "Robin": make_robin,
     "Owl": make_owl,
 }

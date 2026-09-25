@@ -11,6 +11,20 @@ service.
 
 import numpy as np
 
+from dsp_core.audio_fx import extract_loudest_window
+
+# How much of a clip actually gets measured. Reference recordings and live
+# mic clips both arrive at wildly different lengths (a Xeno-canto download
+# might be 20s of habitat noise plus a 0.5s call; a live clip is a fixed
+# RECORD_SECONDS window that may or may not contain the call in the same
+# spot every time). Every clip is auto-trimmed to its own loudest window of
+# this length before any feature is computed, so RMS/ZCR/spectral-shape are
+# measured over comparable, call-dominated audio instead of being diluted
+# by however much silence happened to surround the call. Replaces trimming
+# reference files by eye, which produced inconsistent clip lengths (0.75s-
+# 10.5s) and left silence/noise diluting the features either way.
+TRIM_WINDOW_SECONDS = 2.0
+
 # Feature order matters: it must be identical between reference building
 # and live detection so the weight vector lines up correctly.
 FEATURE_NAMES = (
@@ -92,9 +106,13 @@ def _spectral_shape(y: np.ndarray, sr: int):
 
 def extract_features(y: np.ndarray, sr: int) -> np.ndarray:
     """Reduce a raw audio clip to the fixed-length feature vector defined
-    by FEATURE_NAMES. Works on any clip length, so it's used identically
-    for building references and for a live 3s recording."""
+    by FEATURE_NAMES. Called identically by reference building (on files in
+    static/bird_samples/) and live detection (on the recorded mic clip) —
+    both paths go through this one function, so trimming to the loudest
+    window happens exactly once, in exactly one place, and can't drift out
+    of sync between the two call sites."""
     y = np.asarray(y, dtype=np.float64)
+    y = extract_loudest_window(y, sr, window_seconds=TRIM_WINDOW_SECONDS)
     rms = _rms(y)
     zcr = _zero_crossing_rate(y)
     dominant_freq, centroid, bandwidth, rolloff = _spectral_shape(y, sr)

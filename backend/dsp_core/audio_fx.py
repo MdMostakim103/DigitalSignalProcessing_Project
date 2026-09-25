@@ -475,6 +475,45 @@ def apply_activity_gate(
     return y_out, energies, zcr, frame_times, active, enter_threshold, exit_threshold, noise_floor, peak, zcr_threshold_ratio
 
 
+def extract_loudest_window(
+    y: np.ndarray,
+    sr: int,
+    window_seconds: float = 2.0,
+    frame_ms: float = 25.0,
+    hop_ms: float = 10.0,
+) -> np.ndarray:
+    """Slide a window_seconds-long window across the clip and keep only the
+    single stretch with the most short-time energy — the same per-frame RMS
+    idea apply_activity_gate uses to tell active frames from quiet ones, but
+    instead of gating quiet regions to silence, this picks the one loudest
+    contiguous window outright and discards the rest. Used by the Bird Sound
+    Detector to auto-trim both reference recordings and live mic clips down
+    to (most likely) just the call, so every clip feeding feature extraction
+    is measured the same length and dominated by signal instead of whatever
+    silence/handling-noise happened to surround the call.
+    """
+    window_samples = int(sr * window_seconds)
+    if y.size <= window_samples:
+        return y
+
+    energies, _, _, hop_len = compute_short_time_energy(y, sr, frame_ms, hop_ms)
+    window_frames = max(1, int(round(window_seconds * 1000 / hop_ms)))
+    if energies.size <= window_frames:
+        return y
+
+    # Sliding sum of per-frame energy over window_frames-wide spans, via a
+    # cumulative-sum difference — the discrete equivalent of sliding the
+    # window continuously across overlapping frames.
+    cumulative = np.concatenate(([0.0], np.cumsum(energies)))
+    window_sums = cumulative[window_frames:] - cumulative[:-window_frames]
+    best_start_frame = int(np.argmax(window_sums))
+
+    start_sample = best_start_frame * hop_len
+    end_sample = min(start_sample + window_samples, y.size)
+    start_sample = max(0, end_sample - window_samples)
+    return y[start_sample:end_sample]
+
+
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
