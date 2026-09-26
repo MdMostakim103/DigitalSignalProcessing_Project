@@ -1,4 +1,7 @@
 # backend/main.py
+import os
+os.environ["NUMBA_DISABLE_JIT"] = "1"   # prevents Windows AppControl from blocking numba's DLL
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path

@@ -187,15 +187,6 @@ def apply_filter(
     cutoff2: float = 4000.0,
     order: int = 4,
 ) -> np.ndarray:
-    """Two ideas from the same course unit, side by side:
-    - Five IIR design families (Butterworth, Chebyshev I/II, Elliptic,
-      Bessel), each a different trade-off between passband flatness,
-      stopband attenuation, transition sharpness, and phase linearity —
-      all built from the same order/cutoff inputs.
-    - The "ideal" brick-wall filter, built by zeroing FFT bins outside the
-      passband outright. Perfectly sharp in frequency, but that sharp edge
-      causes ringing (Gibbs phenomenon) in time.
-    """
     if filter_family in IIR_FAMILIES:
         order = max(1, min(10, int(order)))
         sos = _design_coeffs(filter_family, band_type, sr, cutoff, cutoff2, order)

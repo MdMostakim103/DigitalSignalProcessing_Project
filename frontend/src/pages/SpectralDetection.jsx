@@ -6,6 +6,7 @@ import EffectAnimator from "../components/Visualizations/EffectAnimator";
 import FrequencySpectrumAnimator from "../components/Visualizations/FrequencySpectrumAnimator";
 
 const RANGE_LIMIT = { min: 20, max: 8000, step: 10 };
+const MIN_RANGE_GAP_HZ = 10;
 
 function formatBytes(bytes) {
     if (!bytes) return "";
@@ -252,7 +253,7 @@ export default function SpectralDetection() {
                             value={fmin}
                             disabled={isProcessing}
                             style={{ "--pos": (fmin - RANGE_LIMIT.min) / (rangeMax - RANGE_LIMIT.min) }}
-                            onChange={(e) => setFmin(Number(e.target.value))}
+                            onChange={(e) => setFmin(Math.min(Number(e.target.value), fmax - MIN_RANGE_GAP_HZ))}
                         />
                         <small>Peaks below this frequency are ignored (filters out DC/hum/rumble).</small>
                     </div>
@@ -270,7 +271,7 @@ export default function SpectralDetection() {
                             value={fmax}
                             disabled={isProcessing}
                             style={{ "--pos": (fmax - RANGE_LIMIT.min) / (rangeMax - RANGE_LIMIT.min) }}
-                            onChange={(e) => setFmax(Number(e.target.value))}
+                            onChange={(e) => setFmax(Math.max(Number(e.target.value), fmin + MIN_RANGE_GAP_HZ))}
                         />
                         <small>Peaks above this frequency are ignored.</small>
                     </div>
