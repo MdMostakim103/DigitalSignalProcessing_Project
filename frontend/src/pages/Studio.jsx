@@ -40,7 +40,6 @@ const OPERATIONS = [
     { type: "reverb", label: "Reverb", short: "REVERB", defaultParams: {} },
     { type: "equalizer", label: "Equalizer", short: "EQ", defaultParams: { low: 5, mid: 5, high: 5 } },
     { type: "noise", label: "Noise Reduction", short: "DENOISE", defaultParams: {} },
-    { type: "activity", label: "Activity Gate", short: "GATE", defaultParams: { threshold_ratio: 0.15 } },
     {
         type: "morph", label: "Voice Morph", short: "MORPH",
         defaultParams: { morph_mode: "pitch", n_steps: 4, rate: 1.5 },
@@ -108,8 +107,6 @@ function describeStep(type, params) {
             return `Equalizer · low ${params.low} · mid ${params.mid} · high ${params.high}`;
         case "noise":
             return "Noise Reduction · spectral gate";
-        case "activity":
-            return `Activity Gate · threshold ${Math.round(params.threshold_ratio * 100)}%`;
         case "morph": {
             const mode = MORPH_MODES.find((m) => m.value === params.morph_mode)?.label || params.morph_mode;
             const extra = params.morph_mode === "pitch" ? ` · ${params.n_steps > 0 ? "+" : ""}${params.n_steps} st`
@@ -479,12 +476,6 @@ function ChainStepCard({
                         <NumberField label="Mid" min={0} max={10} step={1} value={params.mid} disabled={disabled} onChange={(v) => setParam("mid", v)} />
                         <NumberField label="High" min={0} max={10} step={1} value={params.high} disabled={disabled} onChange={(v) => setParam("high", v)} />
                     </>
-                )}
-
-                {step.type === "activity" && (
-                    <NumberField label="Threshold" min={0.02} max={0.6} step={0.01} value={params.threshold_ratio}
-                        format={(v) => `${Math.round(v * 100)}%`} disabled={disabled}
-                        onChange={(v) => setParam("threshold_ratio", v)} />
                 )}
 
                 {step.type === "morph" && (

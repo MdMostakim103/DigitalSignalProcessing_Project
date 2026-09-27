@@ -90,6 +90,47 @@ export async function processChain(file, chain, irFiles = []) {
     return await response.json();
 }
 
+// Spectral Portal — decodes the upload on the backend and returns a binned
+// spectrogram (magnitude in dB per freq-bin x time-frame) to paint on.
+export async function getSpectrogram(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch(`${API_BASE_URL}/spectrogram`, {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        const message = await response.text().catch(() => "");
+        throw new Error(message || "Spectrogram generation failed");
+    }
+
+    return await response.json();
+}
+
+// Spectral Portal — applies the painted keep/erase rectangles as an
+// X'(k,m) = M(k,m)X(k,m) mask and returns the reconstructed audio plus
+// before/after spectrograms. `regions` is
+// [{ freqMin, freqMax, timeMin, timeMax, action }, ...] in Hz/seconds.
+export async function applySpectralMask(file, regions) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("regions", JSON.stringify(regions));
+
+    const response = await fetch(`${API_BASE_URL}/process-spectral-mask`, {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        const message = await response.text().catch(() => "");
+        throw new Error(message || "Spectral mask processing failed");
+    }
+
+    return await response.json();
+}
+
 // Fetches just the filter's own |H(f)| curve — no audio file needed — so a
 // live preview graph can update as the user drags cutoff/order sliders.
 export async function getFilterResponse({ filterFamily, bandType, cutoff, cutoff2, order, sampleRate }) {

@@ -260,212 +260,6 @@ def compute_short_time_energy(y: np.ndarray, sr: int, frame_ms: float = 25.0, ho
     return energies, frame_times, frame_len, hop_len
 
 
-def compute_zero_crossing_rate(y: np.ndarray, frame_len: int, hop_len: int) -> np.ndarray:
-    """Fraction of adjacent-sample sign flips per frame, using the SAME
-    framing (frame_len, hop_len) as compute_short_time_energy so energy and
-    ZCR line up frame-for-frame. Voiced speech is quasi-periodic around a low
-    fundamental, so it crosses zero slowly (low ZCR); broadband noise crosses
-    zero on almost every sample (high ZCR) even at the same loudness —
-    that's the extra discrimination energy alone doesn't have.
-    """
-    if len(y) <= frame_len:
-        n_frames = 1
-    else:
-        n_frames = 1 + (len(y) - frame_len) // hop_len
-
-    zcr = np.zeros(n_frames, dtype=np.float64)
-    for i in range(n_frames):
-        start = i * hop_len
-        frame = y[start:start + frame_len]
-        if frame.size < 2:
-            continue
-        signs = np.sign(frame)
-        signs[signs == 0] = 1.0
-        zcr[i] = np.mean(np.abs(np.diff(signs)) > 0)
-
-    return zcr
-
-
-def _estimate_noise_floor(energies: np.ndarray, percentile: float = 20.0) -> float:
-    """The Nth percentile of frame energies, not the max. A threshold set as
-    a fraction of the LOUDEST frame is fragile — one loud transient (a door
-    slam, a clipped syllable) rescales the threshold for the entire file. The
-    bottom percentile of frames is far more likely to be background noise/
-    silence in most recordings, and a single outlier there barely moves a
-    percentile the way it dominates a max."""
-    if energies.size == 0:
-        return 0.0
-    return float(np.percentile(energies, percentile))
-
-
-def _estimate_signal_level(energies: np.ndarray, percentile: float = 95.0) -> float:
-    """The high-percentile counterpart to _estimate_noise_floor: a robust
-    stand-in for 'how loud does this recording normally get', used instead
-    of the literal max(). A single 2ms transient can still double the true
-    peak; a 95th-percentile level barely moves, because it takes many loud
-    frames — not one — to shift a percentile. This is what actually closes
-    the threshold's sensitivity to one-off spikes; anchoring the noise floor
-    alone still leaves the top end fully exposed to whatever the single
-    loudest frame happens to be."""
-    if energies.size == 0:
-        return 0.0
-    return float(np.percentile(energies, percentile))
-
-
-def _apply_min_duration(active: np.ndarray, hop_len: int, sr: int, min_speech_ms: float, min_silence_ms: float) -> np.ndarray:
-    """Two clean-up passes over the boolean frame decisions: first bridge
-    short silence gaps (so a single frame that dips below threshold in the
-    middle of a word doesn't chop it in two), then discard speech islands
-    that are too short to be a real syllable (spurious single-frame blips).
-    This is what a per-frame threshold test alone can never provide — it has
-    no notion of "this is happening in the middle of an ongoing word."
-    """
-    n = active.size
-    if n == 0:
-        return active
-    hop_seconds = hop_len / sr
-    min_speech_frames = max(1, int(round(min_speech_ms / 1000 / hop_seconds)))
-    min_silence_frames = max(1, int(round(min_silence_ms / 1000 / hop_seconds)))
-
-    out = active.copy()
-
-    i = 0
-    while i < n:
-        if not out[i]:
-            j = i
-            while j < n and not out[j]:
-                j += 1
-            gap_len = j - i
-            flanked = i > 0 and j < n
-            if flanked and gap_len < min_silence_frames:
-                out[i:j] = True
-            i = j
-        else:
-            i += 1
-
-    i = 0
-    while i < n:
-        if out[i]:
-            j = i
-            while j < n and out[j]:
-                j += 1
-            if (j - i) < min_speech_frames:
-                out[i:j] = False
-            i = j
-        else:
-            i += 1
-
-    return out
-
-
-def _activity_gain_from_frames(active: np.ndarray, hop_len: int, total_len: int, fade_ms: float, sr: int) -> np.ndarray:
-    """Frame decisions -> a per-sample gain envelope. Earlier this convolved
-    with a RECTANGULAR (boxcar) kernel, which is a poor choice: a boxcar's
-    frequency response has sidelobes and its output ramps linearly with a
-    sharp kink at both ends, not a smooth curve. A Hann (raised-cosine)
-    kernel is the standard fix — it has no sidelobes and produces a genuinely
-    smooth S-shaped fade in and out, the same window shape used everywhere
-    else in this app's own FFT analysis (Modules 2, 5, 6)."""
-    gain = np.repeat(active.astype(np.float32), hop_len)
-    if gain.size < total_len:
-        gain = np.pad(gain, (0, total_len - gain.size), mode="edge")
-    gain = gain[:total_len]
-
-    fade_len = max(1, int(sr * fade_ms / 1000))
-    if fade_len > 1 and gain.size:
-        kernel = np.hanning(fade_len).astype(np.float32)
-        kernel_sum = kernel.sum()
-        if kernel_sum > 0:
-            kernel /= kernel_sum
-            gain = np.convolve(gain, kernel, mode="same")
-
-    return gain
-
-
-def apply_activity_gate(
-    y: np.ndarray,
-    sr: int,
-    frame_ms: float = 25.0,
-    hop_ms: float = 10.0,
-    method: str = "energy",
-    energy_threshold_ratio: float = 0.15,
-    zcr_threshold_hz: float = 700.0,
-    hysteresis_ratio: float = 0.5,
-    min_speech_ms: float = 60.0,
-    min_silence_ms: float = 60.0,
-    fade_ms: float = 15.0,
-):
-    """Voice activity detection as a small classical pipeline, not a single
-    threshold test:
-
-      framing -> energy (+ ZCR) -> noise-floor-relative hysteresis -> minimum
-      duration cleanup -> smooth gain -> gated audio
-
-    Two things a bare "energy > threshold_ratio * peak" test gets wrong, both
-    fixed here:
-
-    1. A single loud transient sets the scale for the WHOLE file (the peak).
-       The threshold is instead set relative to an estimated noise floor
-       (a low percentile of frame energies) blended with the peak, so it
-       tracks the actual quiet/loud contrast in the recording rather than
-       one outlier sample.
-
-    2. A single strict per-frame test rejects unvoiced speech (s, f, sh, and
-       stop-consonant bursts) outright, because those are quiet AND
-       high-ZCR — they would fail an energy+ZCR AND-test even though they
-       are real speech, not noise. Fixed with HYSTERESIS: ZCR only gates
-       *entering* the active state (so pure noise can't trigger a false
-       onset), while *staying* active only requires clearing a lower exit
-       threshold on energy. A trailing unvoiced consonant right after a
-       voiced vowel — quieter, higher ZCR — keeps its already-active state
-       instead of being cut off mid-word.
-
-    method="energy" skips the ZCR gate entirely (the "simple" mode); both
-    modes get the noise-floor-relative hysteresis, minimum-duration cleanup,
-    and Hann-smoothed gain.
-    """
-    energies, frame_times, frame_len, hop_len = compute_short_time_energy(y, sr, frame_ms, hop_ms)
-
-    noise_floor = _estimate_noise_floor(energies)
-    peak = float(np.max(energies)) if energies.size else 0.0
-    # The threshold is anchored to a robust signal level, not the literal
-    # peak: a single loud transient can double the true max, but barely
-    # shifts a 95th-percentile estimate. `peak` itself is still reported
-    # (e.g. for display) as the real maximum.
-    signal_level = _estimate_signal_level(energies)
-    headroom = max(0.0, signal_level - noise_floor)
-    enter_threshold = noise_floor + energy_threshold_ratio * headroom
-    exit_threshold = noise_floor + energy_threshold_ratio * hysteresis_ratio * headroom
-
-    use_zcr = method == "energy_zcr"
-    zcr = compute_zero_crossing_rate(y, frame_len, hop_len) if use_zcr else None
-    zcr_threshold_ratio = (zcr_threshold_hz * 2 / sr) if use_zcr else None
-
-    n = energies.size
-    active = np.zeros(n, dtype=bool)
-    state = False
-    for i in range(n):
-        if not state:
-            enters = energies[i] > enter_threshold
-            if use_zcr:
-                enters = enters and zcr[i] < zcr_threshold_ratio
-            state = bool(enters)
-        else:
-            state = bool(energies[i] >= exit_threshold)
-        active[i] = state
-
-    active = _apply_min_duration(active, hop_len, sr, min_speech_ms, min_silence_ms)
-
-    gain = _activity_gain_from_frames(active, hop_len, len(y), fade_ms, sr)
-    y_out = y * gain
-
-    peak_out = np.max(np.abs(y_out))
-    if peak_out > 0:
-        y_out = y_out / peak_out
-
-    return y_out, energies, zcr, frame_times, active, enter_threshold, exit_threshold, noise_floor, peak, zcr_threshold_ratio
-
-
 def extract_loudest_window(
     y: np.ndarray,
     sr: int,
@@ -474,14 +268,12 @@ def extract_loudest_window(
     hop_ms: float = 10.0,
 ) -> np.ndarray:
     """Slide a window_seconds-long window across the clip and keep only the
-    single stretch with the most short-time energy — the same per-frame RMS
-    idea apply_activity_gate uses to tell active frames from quiet ones, but
-    instead of gating quiet regions to silence, this picks the one loudest
-    contiguous window outright and discards the rest. Used by the Bird Sound
-    Detector to auto-trim both reference recordings and live mic clips down
-    to (most likely) just the call, so every clip feeding feature extraction
-    is measured the same length and dominated by signal instead of whatever
-    silence/handling-noise happened to surround the call.
+    single stretch with the most short-time energy, discarding the rest.
+    Used by the Bird Sound Detector to auto-trim both reference recordings
+    and live mic clips down to (most likely) just the call, so every clip
+    feeding feature extraction is measured the same length and dominated by
+    signal instead of whatever silence/handling-noise happened to surround
+    the call.
     """
     window_samples = int(sr * window_seconds)
     if y.size <= window_samples:
@@ -707,6 +499,72 @@ def apply_equalizer(
         y_eq = y_eq / max_value
 
     return y_eq
+
+
+def choose_spectrogram_hop_length(n_samples: int, sr: int, n_fft: int = 2048, max_frames: int = 400) -> int:
+    """Pick the hop length a spectrogram preview and a mask application both
+    use, from nothing but (n_samples, sr) — so the two requests land on the
+    identical time-frame grid without either one having to send the other
+    its hop_length. Starts at 512 (matches every other STFT effect in this
+    module) and doubles until the frame count is display-sized; never goes
+    below 512 so short clips keep fine time resolution."""
+    hop = 512
+    while (n_samples // hop) + 1 > max_frames:
+        hop *= 2
+    return hop
+
+
+def apply_spectral_mask(
+    y: np.ndarray,
+    sr: int,
+    regions: list,
+    n_fft: int = 2048,
+    hop_length: int = None,
+    feather_freq_bins: float = 3.0,
+    feather_time_frames: float = 2.0,
+):
+    """'Paint on the spectrogram' — X'(k,m) = M(k,m)X(k,m).
+
+    Each region is {freqMin, freqMax, timeMin, timeMax, action}, action
+    being "keep" or "erase", in real Hz/seconds so it's independent of
+    whatever bin grid the preview happened to show. If any region is a
+    "keep", everything outside every "keep" region starts silent (an
+    isolating mask); otherwise everything starts audible and only "erase"
+    regions are cut (a subtractive mask). Later regions in the list win
+    where they overlap earlier ones, matching paint order.
+
+    The mask is built as flat 0/1 rectangles, then Gaussian-blurred across
+    both axes before multiplying. A hard rectangular mask creates sharp
+    discontinuities in the STFT that the inverse transform hears as
+    ringing/musical noise; blurring first feathers every edge by a few
+    bins/frames so the cut is smooth instead of a wall.
+    """
+    hop_length = hop_length or choose_spectrogram_hop_length(len(y), sr, n_fft)
+
+    stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    frame_times = librosa.frames_to_time(np.arange(stft.shape[1]), sr=sr, hop_length=hop_length)
+
+    has_keep = any(r.get("action") == "keep" for r in regions)
+    mask = np.full(stft.shape, 0.0 if has_keep else 1.0, dtype=np.float32)
+
+    for region in regions:
+        f_lo, f_hi = sorted((float(region["freqMin"]), float(region["freqMax"])))
+        t_lo, t_hi = sorted((float(region["timeMin"]), float(region["timeMax"])))
+        f_sel = (freqs >= f_lo) & (freqs <= f_hi)
+        t_sel = (frame_times >= t_lo) & (frame_times <= t_hi)
+        mask[np.ix_(f_sel, t_sel)] = 1.0 if region.get("action") == "keep" else 0.0
+
+    from scipy.ndimage import gaussian_filter
+    mask = np.clip(gaussian_filter(mask, sigma=(feather_freq_bins, feather_time_frames)), 0.0, 1.0)
+
+    y_out = librosa.istft(stft * mask, hop_length=hop_length, length=len(y))
+
+    peak = np.max(np.abs(y_out))
+    if peak > 0:
+        y_out = y_out / peak
+
+    return y_out, hop_length
 
 
 def signal_level_stats(y: np.ndarray) -> dict:

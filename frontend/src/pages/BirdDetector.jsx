@@ -201,7 +201,7 @@ export default function BirdDetector() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={status === "recording" || status === "analyzing"}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 07 / BIRD SOUND DETECTOR</span>
+                <span>MODULE 06 / BIRD SOUND DETECTOR</span>
             </div>
 
             <div className="module-intro">

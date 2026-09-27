@@ -26,7 +26,7 @@ export default function FrequencySpectrumAnimator({
     onComplete,
     gain = 1,
 }) {
-    const isTwoPanel = mode === "echo" || mode === "delay" || mode === "activity" || mode === "pitch" || mode === "morph";
+    const isTwoPanel = mode === "echo" || mode === "delay" || mode === "pitch" || mode === "morph";
 
     const source = visualization?.convolution?.frequency || visualization?.frequency;
     const input = source?.input;
@@ -163,7 +163,6 @@ export default function FrequencySpectrumAnimator({
                         {mode === "amplify" && `Y(f) = ${Number(gain).toFixed(2)} · X(f)`}
                         {mode === "delay" && "Y(f) = X(f) · e^{-jωD}  →  |Y(f)| = |X(f)|"}
                         {mode === "echo" && "Y(f) = X(f) · (1 + α·e^{-jωD} + α²·e^{-j2ωD} + …)"}
-                        {mode === "activity" && "Y(f): X(f) with quiet-region energy gated toward silence"}
                         {mode === "pitch" && "Y(f): pure tone synthesized at the detected dominant frequency f₀"}
                         {mode === "morph" && "Y(f) = |X(f)| · e^{ j∠Y(f) }   (phase vocoder resynthesis)"}
                     </strong>
@@ -179,13 +178,11 @@ export default function FrequencySpectrumAnimator({
                 <p className="frequency-note">
                     {mode === "delay"
                         ? "A pure delay only shifts every frequency's phase — it does not touch the magnitude, so X(f) and Y(f) look almost identical here."
-                        : mode === "activity"
-                            ? "Gating quiet frames toward silence removes their broadband contribution, so the output spectrum's overall energy drops without any one frequency being targeted."
-                            : mode === "pitch"
-                                ? "A real signal's energy is usually spread across a fundamental and several overtones (X(f)); the synthesized tone (Y(f)) concentrates all its energy into one sharp spike at f₀ — that spike is the frequency the detector picked."
-                                : mode === "morph"
-                                    ? "A pitch shift slides the whole harmonic pattern to new frequencies. A phase-only morph (robot/whisper) leaves this magnitude picture essentially untouched — which is the point: the audible change came entirely from the phase."
-                                    : "Echo feeds decaying delayed copies back in, which reshapes the magnitude spectrum into a rippled “comb filter” pattern."}
+                        : mode === "pitch"
+                            ? "A real signal's energy is usually spread across a fundamental and several overtones (X(f)); the synthesized tone (Y(f)) concentrates all its energy into one sharp spike at f₀ — that spike is the frequency the detector picked."
+                            : mode === "morph"
+                                ? "A pitch shift slides the whole harmonic pattern to new frequencies. A phase-only morph (robot/whisper) leaves this magnitude picture essentially untouched — which is the point: the audible change came entirely from the phase."
+                                : "Echo feeds decaying delayed copies back in, which reshapes the magnitude spectrum into a rippled “comb filter” pattern."}
                 </p>
             )}
 

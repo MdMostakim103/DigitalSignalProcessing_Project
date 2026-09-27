@@ -25,14 +25,6 @@ export const modules = [
     },
     {
         number: "04",
-        title: "Speech & Activity",
-        shortTitle: "ACTIVITY",
-        description: "See short-time energy divide an audio signal into active and quiet regions.",
-        intro: "Break the signal into short frames and watch energy reveal where speech or activity occurs.",
-        stages: ["Signal", "Frame it", "Measure energy", "Mark activity"],
-    },
-    {
-        number: "05",
         title: "Spectral Detection",
         shortTitle: "PITCH",
         description: "Watch spectral peaks reveal a signal's dominant frequency and estimated pitch.",
@@ -40,7 +32,7 @@ export const modules = [
         stages: ["Input", "Spectrum", "Find peak", "Estimate pitch"],
     },
     {
-        number: "06",
+        number: "05",
         title: "Voice Morphing",
         shortTitle: "VOICE MORPH",
         description: "Explore how spectral phase and pitch information can be manipulated independently.",
@@ -48,11 +40,19 @@ export const modules = [
         stages: ["Frame signal", "Spectrum + phase", "Shift bins", "Reconstruct"],
     },
     {
-        number: "07",
+        number: "06",
         title: "Bird Sound Detector",
         shortTitle: "BIRD ID",
         description: "Record 5 seconds and match the call to a species using classic DSP features.",
         intro: "Extract energy, zero-crossing rate, and spectral-shape features, then compare by weighted distance.",
         stages: ["Record clip", "Extract features", "Compare to references", "Report closest match"],
+    },
+    {
+        number: "07",
+        title: "Spectral Portal",
+        shortTitle: "SPECTRAL PORTAL",
+        description: "Paint keep/erase regions directly on a spectrogram and hear the masked result.",
+        intro: "Build a time-frequency mask by hand and apply it to the real STFT: X'(k,m) = M(k,m)X(k,m).",
+        stages: ["Spectrogram", "Paint mask", "Feather edges", "Inverse STFT"],
     },
 ];

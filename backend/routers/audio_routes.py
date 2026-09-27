@@ -13,20 +13,34 @@ from dsp_core.audio_fx import (
     amplify_volume, apply_reverb, apply_echo, apply_delay,
     apply_convolution, apply_noise_reduction, apply_equalizer,
     apply_filter, compute_filter_frequency_response,
-    apply_activity_gate,
     detect_dominant_frequency, freq_to_note, synthesize_tone,
     apply_voice_morph, signal_level_stats,
+    choose_spectrogram_hop_length, apply_spectral_mask,
 )
 from dsp_core.visualizer import (
     generate_comparison_plot, build_visualization_data, filter_response_bars,
-    build_activity_data, build_pitch_data, build_morph_data, build_bird_data,
-    build_stage_data,
+    build_pitch_data, build_morph_data, build_bird_data,
+    build_stage_data, build_spectrogram_data,
 )
 from dsp_core.bird_detector import classify_bird_sound
 
 router = APIRouter()
 
 STATIC_DIR = Path("static")
+
+
+def _cache_busted(url: str) -> str:
+    """Every processed-audio/plot filename is derived from the effect name
+    and the original upload's filename only — never the effect's parameters
+    (morph mode, rate, mask regions, ...). That's deliberate, so re-running
+    the same effect overwrites its file on disk instead of accumulating one
+    per parameter combination. But it means the URL is IDENTICAL across two
+    runs with different parameters, and a browser <audio>/<img> element does
+    not re-fetch when React sets its src to a string it already has — so the
+    player keeps whatever it first buffered even though the file underneath
+    changed. Appending a unique query string forces every response to be
+    treated as a new resource."""
+    return f"{url}?v={time.time_ns()}"
 
 # Operations the Studio chain builder is allowed to compose. Pitch Detection
 # is deliberately excluded: it doesn't transform the incoming signal, it
@@ -35,7 +49,7 @@ STATIC_DIR = Path("static")
 # effect does. Bird detection is a bonus-module classifier, not an effect.
 CHAINABLE_OPERATIONS = (
     "amplify", "filter", "convolution", "echo", "delay",
-    "reverb", "equalizer", "noise", "activity", "morph",
+    "reverb", "equalizer", "noise", "morph",
 )
 
 MAX_CHAIN_STEPS = 25
@@ -54,9 +68,6 @@ async def process_audio(
     cutoff: float = Form(1000.0),
     cutoff2: float = Form(4000.0),
     order: int = Form(4),
-    threshold_ratio: float = Form(0.15),
-    activity_method: str = Form("energy"),
-    zcr_threshold_hz: float = Form(700.0),
     pitch_fmin: float = Form(50.0),
     pitch_fmax: float = Form(2000.0),
     morph_mode: str = Form("pitch"),
@@ -77,7 +88,6 @@ async def process_audio(
     # 2. Route the math based on the frontend selection
     y_ir = None
     filter_response_data = None
-    activity_data = None
     pitch_data = None
     morph_data = None
     if effect == "convolution":
@@ -109,22 +119,6 @@ async def process_audio(
         y_modified = apply_filter(y, sr, filter_family=filter_family, band_type=band_type, cutoff=cutoff, cutoff2=cutoff2, order=order)
         resp_freqs, resp_mag = compute_filter_frequency_response(filter_family, band_type, sr, cutoff, cutoff2, order)
         filter_response_data = filter_response_bars(resp_freqs, resp_mag, sr)
-    elif effect == "activity":
-        # zcr_threshold_hz is converted to a ratio INSIDE apply_activity_gate,
-        # against the REAL sr librosa just loaded — not client-side, where the
-        # browser's AudioContext may have silently resampled the decoded
-        # buffer to a different rate than the file's actual native one.
-        y_modified, energies, zcr, frame_times, active, enter_thr, exit_thr, noise_floor, peak, zcr_thr = apply_activity_gate(
-            y, sr,
-            method=activity_method,
-            energy_threshold_ratio=threshold_ratio,
-            zcr_threshold_hz=zcr_threshold_hz,
-        )
-        activity_data = build_activity_data(
-            energies, frame_times, active, enter_thr, peak,
-            zcr=zcr, zcr_threshold=zcr_thr,
-            exit_threshold=exit_thr, noise_floor=noise_floor,
-        )
     elif effect == "pitch":
         peak_freq, spectrum, freqs = detect_dominant_frequency(y, sr, fmin=pitch_fmin, fmax=pitch_fmax)
         note = freq_to_note(peak_freq)
@@ -155,10 +149,9 @@ async def process_audio(
         "input_duration_seconds": round(input_duration, 2),
         "processed_duration_seconds": round(processed_duration, 2),
         "status": f"Audio processed with '{effect}' and graphed successfully!",
-        "plot_url": f"http://127.0.0.1:8000/static/plots/plot_{plot_filename}.png",
-        "audio_url": f"http://127.0.0.1:8000/static/processed/{output_filename}",
+        "plot_url": _cache_busted(f"http://127.0.0.1:8000/static/plots/plot_{plot_filename}.png"),
+        "audio_url": _cache_busted(f"http://127.0.0.1:8000/static/processed/{output_filename}"),
         "visualization": visualization,
-        "activity": activity_data,
         "pitch": pitch_data,
         "morph": morph_data,
     }
@@ -218,19 +211,6 @@ def _run_chain_step(op_type: str, y: np.ndarray, sr: int, params: dict, ir_wave:
 
     elif op_type == "noise":
         y_out = apply_noise_reduction(y, sr)
-
-    elif op_type == "activity":
-        y_out, energies, zcr, frame_times, active, enter_thr, exit_thr, noise_floor, peak, zcr_thr = apply_activity_gate(
-            y, sr,
-            method=params.get("activity_method", "energy"),
-            energy_threshold_ratio=float(params.get("threshold_ratio", 0.15)),
-            zcr_threshold_hz=float(params.get("zcr_threshold_hz", 700.0)),
-        )
-        extra["activity"] = build_activity_data(
-            energies, frame_times, active, enter_thr, peak,
-            zcr=zcr, zcr_threshold=zcr_thr,
-            exit_threshold=exit_thr, noise_floor=noise_floor,
-        )
 
     elif op_type == "morph":
         y_out, _ = apply_voice_morph(
@@ -324,7 +304,7 @@ async def process_chain(
         "input": build_stage_data(y, sr),
         "stages": stage_results,
         "output": {
-            "audio_url": f"http://127.0.0.1:8000/static/processed/{output_filename}",
+            "audio_url": _cache_busted(f"http://127.0.0.1:8000/static/processed/{output_filename}"),
             "stats": signal_level_stats(y_current),
             **build_stage_data(y_current, sr),
         },
@@ -368,6 +348,68 @@ async def detect_bird(file: UploadFile = File(...)):
         "status": "Bird sound analyzed.",
         "detection": detection,
         "visualization": visualization,
+    }
+
+
+@router.post("/spectrogram")
+async def spectrogram(file: UploadFile = File(...)):
+    """Spectral Portal — preview. Decodes the upload and returns a binned
+    spectrogram to paint on. Saved to static/uploads under its own name so
+    /process-spectral-mask can re-load the exact same samples afterwards
+    without the browser re-uploading the file a second time."""
+    input_path = Path("static/uploads") / f"portal_{file.filename}"
+    with open(input_path, "wb") as f:
+        f.write(await file.read())
+
+    y, sr = librosa.load(input_path, sr=None)
+    hop_length = choose_spectrogram_hop_length(len(y), sr)
+    data = build_spectrogram_data(y, sr, hop_length=hop_length)
+
+    return {
+        "filename": file.filename,
+        "sampleRate": sr,
+        "spectrogram": data,
+    }
+
+
+@router.post("/process-spectral-mask")
+async def process_spectral_mask(
+    file: UploadFile = File(...),
+    regions: str = Form(...),
+):
+    """Spectral Portal — apply. `regions` is a JSON list of
+    {freqMin, freqMax, timeMin, timeMax, action}, action being "keep" or
+    "erase", in Hz/seconds. Re-loads the same upload /spectrogram saved
+    (see note there) so the mask is built against identical samples."""
+    try:
+        region_list = json.loads(regions)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="`regions` must be valid JSON.")
+
+    if not isinstance(region_list, list) or not region_list:
+        raise HTTPException(status_code=400, detail="`regions` must be a non-empty list.")
+
+    input_path = Path("static/uploads") / f"portal_{file.filename}"
+    if not input_path.exists():
+        with open(input_path, "wb") as f:
+            f.write(await file.read())
+
+    y, sr = librosa.load(input_path, sr=None)
+    hop_length = choose_spectrogram_hop_length(len(y), sr)
+
+    y_modified, hop_length = apply_spectral_mask(y, sr, region_list, hop_length=hop_length)
+
+    output_filename = f"modified_spectral_mask_{file.filename}"
+    output_path = Path("static/processed") / output_filename
+    sf.write(output_path, y_modified, sr)
+
+    return {
+        "filename": file.filename,
+        "audio_url": _cache_busted(f"http://127.0.0.1:8000/static/processed/{output_filename}"),
+        "input_duration_seconds": round(librosa.get_duration(y=y, sr=sr), 2),
+        "processed_duration_seconds": round(librosa.get_duration(y=y_modified, sr=sr), 2),
+        "before": build_spectrogram_data(y, sr, hop_length=hop_length),
+        "after": build_spectrogram_data(y_modified, sr, hop_length=hop_length),
     }
 
 

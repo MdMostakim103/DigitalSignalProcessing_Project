@@ -260,7 +260,7 @@ export default function VoiceMorphing() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={isProcessing}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 06 / VOICE MORPHING</span>
+                <span>MODULE 05 / VOICE MORPHING</span>
             </div>
 
             <div className="module-intro">

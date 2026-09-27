@@ -133,83 +133,6 @@ def _spectrum(signal: np.ndarray, sr: int, bins: int = 56) -> dict:
     return _bin_magnitude(frequencies, spectrum, max_frequency, bins)
 
 
-def build_activity_data(
-    energies: np.ndarray,
-    frame_times: np.ndarray,
-    active: np.ndarray,
-    threshold: float,
-    peak: float,
-    points: int = 180,
-    zcr: np.ndarray = None,
-    zcr_threshold: float = None,
-    exit_threshold: float = None,
-    noise_floor: float = None,
-) -> dict:
-    """Bucket per-frame short-time energy + active/quiet flags into a fixed
-    number of display points — same idea as _downsample_time, but carrying
-    the boolean activity flag alongside the energy curve so the frontend can
-    highlight active vs quiet regions directly.
-
-    zcr/zcr_threshold, when given (the energy+ZCR method), are binned the
-    same way and returned alongside — this is stats/reference data for the
-    finished result, not what drives the process animation, which computes
-    its own small-scale version live from the raw client-side buffer.
-
-    exit_threshold/noise_floor describe the hysteresis: `threshold` is the
-    (higher) enter threshold, `exit_threshold` the lower one a frame must
-    drop below to leave the active state, and `noise_floor` is the estimated
-    background level both are measured relative to."""
-    energies = np.asarray(energies, dtype=np.float32)
-    active = np.asarray(active, dtype=bool)
-    frame_times = np.asarray(frame_times, dtype=np.float32)
-    n = energies.size
-
-    if n == 0:
-        empty = {"energy": [], "active": [], "time": [], "threshold": 0.0, "peak": 0.0}
-        if zcr is not None:
-            empty["zcr"] = []
-            empty["zcrThreshold"] = 0.0
-        if exit_threshold is not None:
-            empty["exitThreshold"] = 0.0
-        if noise_floor is not None:
-            empty["noiseFloor"] = 0.0
-        return empty
-
-    count = min(points, n)
-    edges = np.linspace(0, n, count + 1, dtype=np.int64)
-    energy_ds = np.zeros(count, dtype=np.float32)
-    active_ds = np.zeros(count, dtype=bool)
-    time_ds = np.zeros(count, dtype=np.float32)
-    zcr_ds = np.zeros(count, dtype=np.float32) if zcr is not None else None
-    zcr_arr = np.asarray(zcr, dtype=np.float32) if zcr is not None else None
-    for i in range(count):
-        lo, hi = edges[i], max(edges[i] + 1, edges[i + 1])
-        chunk_e = energies[lo:hi]
-        chunk_a = active[lo:hi]
-        energy_ds[i] = float(np.mean(chunk_e)) if chunk_e.size else 0.0
-        active_ds[i] = bool(np.any(chunk_a)) if chunk_a.size else False
-        time_ds[i] = float(frame_times[min(lo, n - 1)])
-        if zcr_ds is not None:
-            chunk_z = zcr_arr[lo:hi]
-            zcr_ds[i] = float(np.mean(chunk_z)) if chunk_z.size else 0.0
-
-    result = {
-        "energy": energy_ds.tolist(),
-        "active": active_ds.tolist(),
-        "time": time_ds.tolist(),
-        "threshold": float(threshold),
-        "peak": float(peak),
-    }
-    if zcr_ds is not None:
-        result["zcr"] = zcr_ds.tolist()
-        result["zcrThreshold"] = float(zcr_threshold or 0.0)
-    if exit_threshold is not None:
-        result["exitThreshold"] = float(exit_threshold)
-    if noise_floor is not None:
-        result["noiseFloor"] = float(noise_floor)
-    return result
-
-
 def build_pitch_data(
     freqs: np.ndarray,
     spectrum: np.ndarray,
@@ -356,6 +279,60 @@ def build_bird_data(y: np.ndarray, sr: int, detection: dict) -> dict:
         "waveform": _downsample_time(y),
         "spectrum": _spectrum(y, sr),
         "detection": detection,
+    }
+
+
+def build_spectrogram_data(y: np.ndarray, sr: int, hop_length: int, n_fft: int = 2048, max_freq_bins: int = 220) -> dict:
+    """Full time-resolution, display-binned-frequency spectrogram for the
+    Spectral Portal painting canvas. hop_length is passed in rather than
+    chosen here — the caller (the route) picks it once via
+    choose_spectrogram_hop_length and reuses it for both this preview and
+    the eventual apply_spectral_mask call, so a region drawn against this
+    grid lands on the same time frames the mask actually gets built on.
+
+    Frequency is binned down to max_freq_bins (max-pooled, like every other
+    spectrum in this file) purely for payload size — a region's freqMin/
+    freqMax are real Hz, so masking still happens at full FFT resolution
+    regardless of how coarse this preview looks. Time is left at full frame
+    resolution: hop_length was already chosen to keep that frame count
+    display-sized, and coarsening it further would blur exactly the axis
+    the user is trying to paint precise cuts along.
+    """
+    import librosa
+
+    y = np.asarray(y, dtype=np.float32)
+    if y.size < n_fft:
+        return {
+            "magnitudeDb": [], "freqBins": 0, "frameCount": 0,
+            "maxFrequency": min(float(sr / 2), 20000.0), "duration": float(y.size / sr) if sr else 0.0,
+            "hopLength": hop_length, "nFft": n_fft, "dbMin": -80.0, "dbMax": 0.0,
+        }
+
+    stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    magnitude_db = librosa.amplitude_to_db(np.abs(stft), ref=np.max)
+
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    max_frequency = min(float(sr / 2), 20000.0)
+    valid = freqs <= max_frequency
+    magnitude_db = magnitude_db[valid, :]
+
+    freq_bin_count = min(max_freq_bins, magnitude_db.shape[0])
+    edges = np.linspace(0, magnitude_db.shape[0], freq_bin_count + 1, dtype=np.int64)
+    binned = np.zeros((freq_bin_count, magnitude_db.shape[1]), dtype=np.float32)
+    for i in range(freq_bin_count):
+        lo, hi = edges[i], max(edges[i] + 1, edges[i + 1])
+        binned[i] = np.max(magnitude_db[lo:hi], axis=0)
+
+    return {
+        "magnitudeDb": binned.tolist(),
+        "freqBins": freq_bin_count,
+        "frameCount": int(binned.shape[1]),
+        "maxFrequency": max_frequency,
+        "duration": float(y.size / sr),
+        "hopLength": hop_length,
+        "nFft": n_fft,
+        "dbMin": float(np.min(binned)) if binned.size else -80.0,
+        "dbMax": float(np.max(binned)) if binned.size else 0.0,
     }
 
 
