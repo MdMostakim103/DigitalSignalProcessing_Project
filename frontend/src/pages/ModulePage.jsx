@@ -145,12 +145,21 @@ function ModulePage({ moduleNumber }) {
     const [fileName, setFileName] = useState("");
     const [signalSamples, setSignalSamples] = useState(null);
 
-    useEffect(() => {
+    // Reset the per-module state when moduleNumber changes. Setting state
+    // directly during render (guarded by comparing against a tracked
+    // previous value) rather than in an effect is the pattern React's own
+    // docs recommend for "adjusting state when a prop changes" — React
+    // re-renders immediately with the reset values before the browser
+    // paints, so there's no flash of stale state the way there would be if
+    // this ran a render later, inside an effect.
+    const [prevModuleNumber, setPrevModuleNumber] = useState(moduleNumber);
+    if (moduleNumber !== prevModuleNumber) {
+        setPrevModuleNumber(moduleNumber);
         setRunning(false);
         setProgress(0);
         setFileName("");
         setSignalSamples(null);
-    }, [moduleNumber]);
+    }
 
     useEffect(() => {
         if (!running) return undefined;

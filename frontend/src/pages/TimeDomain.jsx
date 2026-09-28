@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "../styles/time-domain.css";
 import { processAudio } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 import ConvolutionAnimator from "../components/Visualizations/ConvolutionAnimator";
 import EffectAnimator from "../components/Visualizations/EffectAnimator";
 import FrequencySpectrumAnimator from "../components/Visualizations/FrequencySpectrumAnimator";
@@ -100,7 +101,6 @@ export default function TimeDomain() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [warning, setWarning] = useState("");
     const [showVisualizer, setShowVisualizer] = useState(false);
-    const [animationDone, setAnimationDone] = useState(false);
 
     const [backendResult, setBackendResult] = useState(null);
     const [showModal, setShowModal] = useState(false);
@@ -120,6 +120,13 @@ export default function TimeDomain() {
     const audioCtxRef = useRef(null);
     const inputUrlRef = useRef("");
     const irUrlRef = useRef("");
+    // Only ever read to decide whether both halves of a run have finished
+    // (the animation and the backend response can complete in either order
+    // — convolution's animation can finish before the backend responds) —
+    // never rendered, so a ref avoids an extra render on its own and lets
+    // setShowModal be called directly from whichever completion happens
+    // second, instead of combining the two in an effect.
+    const animationDoneRef = useRef(false);
 
     const currentContent = MODE_CONTENT[mode];
 
@@ -137,9 +144,7 @@ export default function TimeDomain() {
         return audioCtxRef.current;
     };
 
-    const handleFileUpload = async (event, type) => {
-        const file = event.target.files?.[0];
-        event.target.value = "";
+    const loadFile = async (file, type) => {
         if (!file) return;
 
         try {
@@ -171,17 +176,31 @@ export default function TimeDomain() {
         }
 
         setShowVisualizer(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setBackendResult(null);
         setShowModal(false);
         setWarning("");
+    };
+
+    const handleFileUpload = async (event, type) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        await loadFile(file, type);
+    };
+
+    const handleRecordingComplete = async (file) => {
+        await loadFile(file, "input");
+    };
+
+    const handleRecordingError = (message) => {
+        setWarning(message);
     };
 
     const switchMode = (nextMode) => {
         if (isProcessing) return;
         setMode(nextMode);
         setShowVisualizer(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setBackendResult(null);
         setShowModal(false);
         setDomain("time");
@@ -209,7 +228,7 @@ export default function TimeDomain() {
         setWarning("");
         setBackendResult(null);
         setShowModal(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setDomain("time");
         setModalDomain("time");
 
@@ -232,6 +251,11 @@ export default function TimeDomain() {
             );
             setBackendResult(result);
             if (!isConvolution) setShowVisualizer(true);
+            // The animation may have already finished by the time the
+            // backend responds (or may still be running) — if it's already
+            // done, this response is the second half to arrive, so open the
+            // modal now instead of waiting on an effect to notice.
+            if (animationDoneRef.current) setShowModal(true);
         } catch (err) {
             console.error(err);
             setWarning("Failed to connect to the FastAPI backend on port 8000.");
@@ -240,12 +264,6 @@ export default function TimeDomain() {
             setIsProcessing(false);
         }
     };
-
-    // Open the results popup only once the on-screen animation has actually
-    // finished AND the backend result has arrived (whichever comes second).
-    useEffect(() => {
-        if (animationDone && backendResult) setShowModal(true);
-    }, [animationDone, backendResult]);
 
     const isRunDisabled = isProcessing || !inputFile || (currentContent.requiresIR && !irFile);
 
@@ -284,8 +302,8 @@ export default function TimeDomain() {
                 <div className="module-controls" style={{ marginBottom: currentContent.requiresIR ? "16px" : "40px" }}>
                     <div>
                         <span className="control-kicker">01 / INPUT SIGNAL</span>
-                        <h2>Bring in a WAV signal</h2>
-                        <p>Choose an audio file for x[n].</p>
+                        <h2>Bring in an audio signal</h2>
+                        <p>Choose an audio file for x[n], or record one live.</p>
                     </div>
                     <div className="upload-group">
                         {inputBuffer && (
@@ -295,9 +313,14 @@ export default function TimeDomain() {
                             </div>
                         )}
                         <label className={`upload-module-button ${isProcessing ? "is-disabled" : ""}`}>
-                            {inputBuffer ? "CHANGE WAV" : "CHOOSE WAV"}
+                            {inputBuffer ? "CHANGE AUDIO FILE" : "CHOOSE INPUT AUDIO FILE"}
                             <input ref={inputRef} type="file" accept="audio/*" disabled={isProcessing} onChange={(e) => handleFileUpload(e, "input")} />
                         </label>
+                        <MicRecordButton
+                            onRecordingComplete={handleRecordingComplete}
+                            onError={handleRecordingError}
+                            disabled={isProcessing}
+                        />
                     </div>
                 </div>
 
@@ -437,7 +460,13 @@ export default function TimeDomain() {
                                     <ConvolutionAnimator
                                         inputBuffer={inputBuffer}
                                         irBuffer={irBuffer}
-                                        onComplete={() => setAnimationDone(true)}
+                                        onComplete={() => {
+                                            // Convolution's animation can finish before the
+                                            // backend responds — only open the modal here if
+                                            // the backend half has already arrived too.
+                                            animationDoneRef.current = true;
+                                            if (backendResult) setShowModal(true);
+                                        }}
                                     />
                                 ) : (
                                     backendResult ? (
@@ -447,7 +476,13 @@ export default function TimeDomain() {
                                             delayMs={runParams.delayMs}
                                             decay={runParams.decay}
                                             repeats={runParams.repeats}
-                                            onComplete={() => setAnimationDone(true)}
+                                            onComplete={() => {
+                                                // This branch only renders once backendResult
+                                                // already exists, so the backend half is
+                                                // guaranteed to have already arrived here.
+                                                animationDoneRef.current = true;
+                                                setShowModal(true);
+                                            }}
                                         />
                                     ) : (
                                         <div className="spectrum-empty">Waiting for the backend…</div>

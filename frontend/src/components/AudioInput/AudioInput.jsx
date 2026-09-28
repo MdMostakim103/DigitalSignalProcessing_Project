@@ -17,7 +17,16 @@ function AudioInput() {
     const [processedCurrentTime, setProcessedCurrentTime] = useState(0);
     const [error, setError] = useState("");
 
+    // The DOM <audio> element itself, once AudioPlayer reports it's ready.
+    // Kept as a ref+state pair: the state copy is read during render (passed
+    // down to Waveform/ProcessedWaveform as a prop — a plain ref wouldn't
+    // trigger the re-render needed for that), while the ref copy is what
+    // handleSeek/handleProcessedSeek mutate imperatively (.currentTime = ...)
+    // — writing to a value straight out of useState is exactly what
+    // setState exists to replace, so the mutable copy has to live in a ref.
+    const [audioElement, setAudioElement] = useState(null);
     const audioElementRef = useRef(null);
+    const [processedAudioElement, setProcessedAudioElement] = useState(null);
     const processedAudioElementRef = useRef(null);
 
     const [selectedEffect, setSelectedEffect] = useState("amplify");
@@ -27,8 +36,9 @@ function AudioInput() {
     const [eqMid, setEqMid] = useState(5);
     const [eqHigh, setEqHigh] = useState(5);
 
-    const handleAudioReady = (audioElement) => {
-        audioElementRef.current = audioElement;
+    const handleAudioReady = (element) => {
+        audioElementRef.current = element;
+        setAudioElement(element);
     };
 
     const effectNames = {
@@ -46,7 +56,7 @@ function AudioInput() {
         }
     };
     const handleProcessedSeek = (time) => {
-        if (processedAudioElementRef.current){
+        if (processedAudioElementRef.current) {
             processedAudioElementRef.current.currentTime = time;
             setProcessedCurrentTime(time);
         }
@@ -55,7 +65,7 @@ function AudioInput() {
 
     const handleProcess = async () => {
         if (!selectedAudio?.file) {
-            setError("Please upload a WAV file first.");
+            setError("Please upload an audio file first.");
             return;
         }
 
@@ -109,8 +119,8 @@ function AudioInput() {
                 </h2>
 
                 <p>
-                    Upload a WAV file or explore one of the
-                    provided sample signals.
+                    Upload an audio file, record one live, or explore
+                    one of the provided sample signals.
                 </p>
             </div>
 
@@ -149,7 +159,7 @@ function AudioInput() {
                         audio={selectedAudio}
                         currentTime={currentTime}
                         onSeek={handleSeek}
-                        audioElement={audioElementRef.current}
+                        audioElement={audioElement}
                     />
 
                     <div className="processing-controls">
@@ -320,6 +330,7 @@ function AudioInput() {
                         onTimeUpdate={setProcessedCurrentTime}
                         onAudioReady={(element) => {
                             processedAudioElementRef.current = element;
+                            setProcessedAudioElement(element);
                         }}
                     />
 
@@ -327,7 +338,7 @@ function AudioInput() {
                         audio={processedAudio}
                         currentTime={processedCurrentTime}
                         onSeek={handleProcessedSeek}
-                        audioElement={processedAudioElementRef.current}
+                        audioElement={processedAudioElement}
                     />
 
                     <div className="processing-result">

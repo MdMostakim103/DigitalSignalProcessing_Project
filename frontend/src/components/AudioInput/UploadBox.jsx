@@ -1,26 +1,31 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
+import MicRecordButton from "./MicRecordButton";
 
 function UploadBox({ onAudioSelect }) {
     const fileInputRef = useRef(null);
+    const [error, setError] = useState("");
 
     const handleClick = () => {
         fileInputRef.current.click();
     };
 
-    const handleFileChange = (event) => {
-        const file = event.target.files[0];
-
-        if (!file) {
-            return;
-        }
+    const selectFile = (file) => {
+        if (!file) return;
 
         const audioUrl = URL.createObjectURL(file);
+        setError("");
 
         onAudioSelect({
             name: file.name,
             src: audioUrl,
             file: file,
         });
+    };
+
+    const handleFileChange = (event) => {
+        const file = event.target.files[0];
+        event.target.value = "";
+        selectFile(file);
     };
 
     return (
@@ -31,12 +36,12 @@ function UploadBox({ onAudioSelect }) {
             </div>
 
             <h3>
-                DROP YOUR WAV FILE
+                DROP YOUR AUDIO FILE
             </h3>
 
             <p>
                 Upload an audio file to begin signal
-                processing.
+                processing, or record one live.
             </p>
 
             <button
@@ -45,6 +50,11 @@ function UploadBox({ onAudioSelect }) {
             >
                 Upload Audio
             </button>
+
+            <MicRecordButton
+                onRecordingComplete={selectFile}
+                onError={setError}
+            />
 
             <input
                 ref={fileInputRef}
@@ -55,8 +65,14 @@ function UploadBox({ onAudioSelect }) {
             />
 
             <span className="upload-hint">
-                WAV files only
+                Any audio format works
             </span>
+
+            {error && (
+                <p className="upload-error">
+                    {error}
+                </p>
+            )}
 
         </div>
     );

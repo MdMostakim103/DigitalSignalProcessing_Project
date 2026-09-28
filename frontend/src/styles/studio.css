@@ -216,6 +216,46 @@
     margin-bottom: 6px;
 }
 
+.mic-record-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 16px;
+    border: 1px solid var(--studio-border);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.075);
+    color: var(--studio-text);
+    font: inherit;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.mic-record-icon { color: #ff6b7a; font-size: 10px; }
+
+.mic-record-button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); border-color: var(--studio-border-strong); }
+.mic-record-button:disabled { opacity: .45; cursor: not-allowed; }
+
+.mic-record-button.is-recording {
+    background: rgba(255, 107, 122, .15);
+    border-color: #ff6b7a;
+    color: #ff6b7a;
+}
+
+.mic-record-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff6b7a;
+    animation: mic-record-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes mic-record-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .35; }
+}
+
 .audio-file-row {
     display: flex;
     justify-content: space-between;

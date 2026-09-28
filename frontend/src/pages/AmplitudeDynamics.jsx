@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { processAudio } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 import "../styles/amplitude-dynamics.css";
 import FrequencySpectrumAnimator from "../components/Visualizations/FrequencySpectrumAnimator";
 
@@ -37,12 +38,6 @@ const PHASE_SPANS = {
     multiply: [0.24, 0.82],
     write: [0.82, 1],
 };
-
-const PHASE_STEPS = [
-    { key: "load", label: "LOAD", hint: "Read x[n]" },
-    { key: "multiply", label: "MULTIPLY", hint: "Scale by gain" },
-    { key: "write", label: "WRITE", hint: "Store y[n]" },
-];
 
 /* ------------------------------------------------------------------ */
 /*  Small helpers                                                      */
@@ -579,6 +574,12 @@ function SignalPlot({
     const hasData = layers.some((layer) => layer.data?.length);
     const interactive = Boolean(onSeek) && !disabled && hasData;
 
+    // Updated in a layout effect (no dependency array, so it runs after
+    // every render) rather than directly in the render body — this is
+    // read later from a ResizeObserver callback and from the redraw()
+    // calls below, both of which happen outside render, so the function
+    // itself must not be written to a ref while rendering is in progress.
+    useLayoutEffect(() => {
     drawRef.current = (ctx, width, height, font) => {
         const geo = getGeometry(width, height);
         drawFrame(ctx, geo, { range, duration, font });
@@ -636,6 +637,7 @@ function SignalPlot({
             }
         }
     };
+    });
 
     // Slow "draw-on" reveal whenever a new signal arrives.
     useLayoutEffect(() => {
@@ -787,9 +789,13 @@ function ProcessingPanel({
     // Once the backend run has completed, keep the center visualization alive.
     // The modal can open over it, and after the modal closes the transformation
     // continues cycling instead of becoming a static "COMPLETE" card.
+    // loopProgress is only ever read below while phase === "complete", so
+    // there is nothing to reset when leaving that phase — the next time
+    // phase becomes "complete" again this effect restarts its own
+    // performance.now() baseline and the very first tick lands loopProgress
+    // back near 0 anyway.
     useEffect(() => {
         if (phase !== "complete") {
-            setLoopProgress(0);
             return undefined;
         }
 
@@ -816,12 +822,16 @@ function ProcessingPanel({
     const local = phaseLocal(displayPhase, displayProgress);
     const count = data?.length || 0;
 
+    // Updated in a layout effect (no dependency array, so it runs after
+    // every render) rather than directly in the render body — see the
+    // matching comment on the SignalPlot component above for why.
+    useLayoutEffect(() => {
     drawRef.current = (ctx, width, height, font) => {
         const geo = getGeometry(width, height);
         drawFrame(ctx, geo, { range, duration, font });
 
         if (!count) {
-            drawEmptyMessage(ctx, geo, "Upload a WAV to begin", font);
+            drawEmptyMessage(ctx, geo, "Upload audio to begin", font);
             return;
         }
 
@@ -906,6 +916,7 @@ function ProcessingPanel({
             drawPointer(ctx, head, OUTPUT_COLOR, 7);
         }
     };
+    });
 
     useLayoutEffect(() => {
         redraw();
@@ -923,10 +934,8 @@ function ProcessingPanel({
             ? Math.round((index / (count - 1)) * Math.max(0, (sampleCount || count) - 1))
             : null;
 
-    const currentStep = PHASE_STEPS.findIndex((step) => step.key === displayPhase);
-
     const statusText = (() => {
-        if (!count) return "Upload a WAV to begin.";
+        if (!count) return "Upload audio to begin.";
         if (phase === "complete") return "Backend result complete — replaying the transformation continuously.";
         if (displayPhase === "load") return "Reading the input samples from left to right…";
         if (displayPhase === "multiply") return `Multiplying every sample by ${activeFactor.toFixed(2)}×…`;
@@ -1082,10 +1091,6 @@ function AmplitudeDynamics() {
 
     const selectFile = async (file) => {
         if (!file || processing) return;
-        if (!file.name.toLowerCase().endsWith(".wav")) {
-            setError("Please choose a WAV file.");
-            return;
-        }
 
         const loadId = loadIdRef.current + 1;
         loadIdRef.current = loadId;
@@ -1133,7 +1138,7 @@ function AmplitudeDynamics() {
             console.error(err);
             setInputData(null);
             setDuration(0);
-            setError("The WAV file could not be decoded in the browser.");
+            setError("That audio file could not be decoded in the browser.");
         }
     };
 
@@ -1344,8 +1349,8 @@ function AmplitudeDynamics() {
                 >
                     <div>
                         <span className="control-kicker">01 / INPUT</span>
-                        <h2>Bring in a WAV signal</h2>
-                        <p>Choose an audio file or drop it here. The signal becomes the input to the operation.</p>
+                        <h2>Bring in an audio signal</h2>
+                        <p>Choose an audio file or drop it here, or record one live. The signal becomes the input to the operation.</p>
                     </div>
                     <div className="upload-group">
                         {audioFile && (
@@ -1365,8 +1370,13 @@ function AmplitudeDynamics() {
                                     selectFile(file);
                                 }}
                             />
-                            {audioFile ? "CHANGE WAV" : "CHOOSE WAV"}
+                            {audioFile ? "CHANGE AUDIO FILE" : "CHOOSE INPUT AUDIO FILE"}
                         </label>
+                        <MicRecordButton
+                            onRecordingComplete={selectFile}
+                            onError={setError}
+                            disabled={processing}
+                        />
                     </div>
                 </div>
 
@@ -1479,7 +1489,7 @@ function AmplitudeDynamics() {
                             onSeek={(ratio) => seekAudio("input", ratio)}
                             disabled={processing}
                             label="Input"
-                            emptyText="Upload a WAV to begin"
+                            emptyText="Upload audio to begin"
                             title="x[n] · ORIGINAL SIGNAL"
                             meta={formatMeta(inputMeta)}
                         />

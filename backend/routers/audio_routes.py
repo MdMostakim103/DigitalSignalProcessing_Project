@@ -74,6 +74,7 @@ async def process_audio(
     morph_mode: str = Form("pitch"),
     n_steps: float = Form(4.0),
     rate: float = Form(1.5),
+    robot_preset: str = Form("classic"),
     delay_ms: float = Form(280.0),
     decay: float = Form(0.55),
     repeats: int = Form(5),
@@ -140,7 +141,7 @@ async def process_audio(
         y_modified = synthesize_tone(peak_freq, len(y) / sr, sr)
         pitch_data = build_pitch_data(freqs, spectrum, sr, peak_freq, note)
     elif effect == "morph":
-        y_modified, morph_stft = apply_voice_morph(y, sr, morph_mode=morph_mode, n_steps=n_steps, rate=rate)
+        y_modified, morph_stft = apply_voice_morph(y, sr, morph_mode=morph_mode, n_steps=n_steps, rate=rate, robot_preset=robot_preset)
         morph_data = build_morph_data(y, y_modified, sr, morph_mode, output_stft=morph_stft)
     else:
         y_modified = amplify_volume(y, 1)
@@ -235,6 +236,7 @@ def _run_chain_step(op_type: str, y: np.ndarray, sr: int, params: dict, ir_wave:
             morph_mode=params.get("morph_mode", "pitch"),
             n_steps=float(params.get("n_steps", 4.0)),
             rate=float(params.get("rate", 1.5)),
+            robot_preset=params.get("robot_preset", "classic"),
         )
 
     else:

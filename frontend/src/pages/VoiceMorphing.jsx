@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "../styles/time-domain.css";
 import { processAudio } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 import MorphAnimator from "../components/Visualizations/MorphAnimator";
 import EffectAnimator from "../components/Visualizations/EffectAnimator";
 import FrequencySpectrumAnimator from "../components/Visualizations/FrequencySpectrumAnimator";
@@ -53,6 +54,51 @@ const MORPH_CONTENT = {
 
 const MORPH_ORDER = ["pitch", "stretch", "robot", "whisper"];
 
+// Named "robot voice" presets, only shown/used when morphMode === "robot".
+// Every preset starts from the same zero-phase base as "classic" and layers
+// a different chain of DSP effects (pitch shift, filtering, ring
+// modulation, distortion, reverb) on top — see apply_robot_voice on the
+// backend for exactly what each one does.
+const ROBOT_PRESETS = {
+    classic: {
+        label: "CLASSIC",
+        desc: "Keep every magnitude exactly as it was and set all phase to zero. Nothing about |X(f)| changes, yet the voice becomes a flat monotone buzz — that difference is what the phase was carrying.",
+        formula: "∠Y(f) = 0   ·   |Y(f)| = |X(f)|",
+        outputCaption: "zero-phase (robotized) signal",
+        paramLabel: "phase set to 0 · magnitude untouched",
+    },
+    vader: {
+        label: "VADER-STYLE",
+        desc: "Starts from the same zero-phase base, then pitched down ~5 semitones, lowpass-filtered so it sounds muffled behind a mask, soft-clipped for grit, and finished with a touch of reverb for a helmet-chamber resonance.",
+        formula: "∠Y(f)=0 → pitch↓5 → LPF 3kHz → soft-clip → reverb",
+        outputCaption: "deep, masked robot voice",
+        paramLabel: "pitched down · lowpass masked · soft-clip + reverb",
+    },
+    droid: {
+        label: "PROTOCOL DROID",
+        desc: "The zero-phase base, pitched up slightly with a bright EQ tilt and a faint high-frequency ring modulation — a prim, fussy, faintly metallic protocol-droid tone.",
+        formula: "∠Y(f)=0 → pitch↑2.5 → bright EQ → ring-mod 90Hz",
+        outputCaption: "bright, prim protocol-droid voice",
+        paramLabel: "pitched up · bright EQ · light ring-mod",
+    },
+    trooper: {
+        label: "RADIO TROOPER",
+        desc: "The zero-phase base squeezed through a narrow radio bandpass, buzzed with ring modulation, and dusted with static noise — a helmet-comms voice.",
+        formula: "∠Y(f)=0 → bandpass 300–3000Hz → ring-mod 40Hz → static",
+        outputCaption: "radio-comms trooper voice",
+        paramLabel: "radio band-pass · ring-mod · static",
+    },
+    cylon: {
+        label: "CYLON MONOTONE",
+        desc: "The zero-phase base with a heavier ring modulation layered on top, for a harsher, more overtly mechanical monotone than the classic robot alone.",
+        formula: "∠Y(f)=0 → ring-mod 45Hz (heavy)",
+        outputCaption: "harsh mechanical monotone",
+        paramLabel: "phase set to 0 · heavy ring-mod",
+    },
+};
+
+const ROBOT_PRESET_ORDER = ["classic", "vader", "droid", "trooper", "cylon"];
+
 const STEPS_RANGE = { min: -12, max: 12, step: 1 };
 const RATE_RANGE = { min: 0.5, max: 2, step: 0.05 };
 
@@ -98,6 +144,7 @@ function MiniWaveGraph({ data, color, sharedMax }) {
 
 export default function VoiceMorphing() {
     const [morphMode, setMorphMode] = useState("pitch");
+    const [robotPreset, setRobotPreset] = useState("classic");
     const [domain, setDomain] = useState("process");
 
     const [inputBuffer, setInputBuffer] = useState(null);
@@ -109,15 +156,21 @@ export default function VoiceMorphing() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [warning, setWarning] = useState("");
     const [showVisualizer, setShowVisualizer] = useState(false);
-    const [animationDone, setAnimationDone] = useState(false);
 
     const [backendResult, setBackendResult] = useState(null);
     const [showModal, setShowModal] = useState(false);
     const [modalDomain, setModalDomain] = useState("time");
 
+    // Only ever read to decide whether both halves of a run have finished
+    // (the animation and the backend response can complete in either
+    // order) — never rendered, so a ref avoids an extra render on its own
+    // and lets setShowModal be called directly from whichever completion
+    // happens second, instead of combining the two in an effect.
+    const animationDoneRef = useRef(false);
+
     const [nSteps, setNSteps] = useState(4);
     const [rate, setRate] = useState(1.5);
-    const [runParams, setRunParams] = useState({ mode: "pitch", nSteps: 4, rate: 1.5 });
+    const [runParams, setRunParams] = useState({ mode: "pitch", nSteps: 4, rate: 1.5, robotPreset: "classic" });
 
     // Each animation plays once on its first mount, then freezes fully
     // revealed. Bumping these forces a remount (a fresh play-through) only
@@ -131,7 +184,11 @@ export default function VoiceMorphing() {
     const audioCtxRef = useRef(null);
     const inputUrlRef = useRef("");
 
-    const content = MORPH_CONTENT[morphMode];
+    // For "robot" mode, the active preset's copy (desc/formula/caption)
+    // overrides the generic MORPH_CONTENT.robot entry.
+    const content = morphMode === "robot"
+        ? { ...MORPH_CONTENT.robot, ...ROBOT_PRESETS[robotPreset] }
+        : MORPH_CONTENT[morphMode];
 
     useEffect(() => {
         return () => {
@@ -148,16 +205,14 @@ export default function VoiceMorphing() {
 
     const resetVisualizerState = () => {
         setShowVisualizer(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setBackendResult(null);
         setShowModal(false);
         setDomain("process");
         setModalDomain("time");
     };
 
-    const handleFileUpload = async (event) => {
-        const file = event.target.files?.[0];
-        event.target.value = "";
+    const loadFile = async (file) => {
         if (!file) return;
 
         try {
@@ -184,9 +239,29 @@ export default function VoiceMorphing() {
         resetVisualizerState();
     };
 
+    const handleFileUpload = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        await loadFile(file);
+    };
+
+    const handleRecordingComplete = async (file) => {
+        await loadFile(file);
+    };
+
+    const handleRecordingError = (message) => {
+        setWarning(message);
+    };
+
     const switchMorph = (nextMode) => {
         if (isProcessing) return;
         setMorphMode(nextMode);
+        resetVisualizerState();
+    };
+
+    const switchRobotPreset = (nextPreset) => {
+        if (isProcessing) return;
+        setRobotPreset(nextPreset);
         resetVisualizerState();
     };
 
@@ -202,11 +277,11 @@ export default function VoiceMorphing() {
         setWarning("");
         setBackendResult(null);
         setShowModal(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setDomain("process");
         setModalDomain("time");
         setShowVisualizer(true);
-        setRunParams({ mode: morphMode, nSteps, rate });
+        setRunParams({ mode: morphMode, nSteps, rate, robotPreset });
 
         try {
             const result = await processAudio(
@@ -219,9 +294,15 @@ export default function VoiceMorphing() {
                     morph_mode: morphMode,
                     n_steps: content.usesSteps ? nSteps : undefined,
                     rate: content.usesRate ? rate : undefined,
+                    robot_preset: morphMode === "robot" ? robotPreset : undefined,
                 }
             );
             setBackendResult(result);
+            // The animation may have already finished by the time the
+            // backend responds (or may still be running) — if it's already
+            // done, this response is the second half to arrive, so open the
+            // modal now instead of waiting on an effect to notice.
+            if (animationDoneRef.current) setShowModal(true);
         } catch (err) {
             console.error(err);
             setWarning("Failed to connect to the FastAPI backend on port 8000.");
@@ -230,10 +311,6 @@ export default function VoiceMorphing() {
             setIsProcessing(false);
         }
     };
-
-    useEffect(() => {
-        if (animationDone && backendResult) setShowModal(true);
-    }, [animationDone, backendResult]);
 
     const isRunDisabled = isProcessing || !inputFile;
 
@@ -245,13 +322,16 @@ export default function VoiceMorphing() {
         1e-6
     );
 
-    const runContent = MORPH_CONTENT[runParams.mode] || content;
+    const runContent = runParams.mode === "robot"
+        ? { ...MORPH_CONTENT.robot, ...ROBOT_PRESETS[runParams.robotPreset || "classic"] }
+        : (MORPH_CONTENT[runParams.mode] || content);
+
     const paramLabel = runParams.mode === "pitch"
         ? `${runParams.nSteps > 0 ? "+" : ""}${runParams.nSteps} semitones · duration preserved`
         : runParams.mode === "stretch"
             ? `rate = ${runParams.rate.toFixed(2)}× · pitch preserved`
             : runParams.mode === "robot"
-                ? "phase set to 0 · magnitude untouched"
+                ? (ROBOT_PRESETS[runParams.robotPreset || "classic"]?.paramLabel || "phase set to 0 · magnitude untouched")
                 : "phase randomized · magnitude untouched";
 
     return (
@@ -281,14 +361,30 @@ export default function VoiceMorphing() {
                         </button>
                     ))}
                 </div>
+
+                {morphMode === "robot" && (
+                    <div className="preset-selector-row">
+                        {ROBOT_PRESET_ORDER.map((key) => (
+                            <button
+                                key={key}
+                                type="button"
+                                className={robotPreset === key ? "selected" : ""}
+                                onClick={() => switchRobotPreset(key)}
+                                disabled={isProcessing}
+                            >
+                                {ROBOT_PRESETS[key].label}
+                            </button>
+                        ))}
+                    </div>
+                )}
             </div>
 
             <div className="module-workspace">
                 <div className="module-controls" style={{ marginBottom: "40px" }}>
                     <div>
                         <span className="control-kicker">01 / INPUT SIGNAL</span>
-                        <h2>Bring in a WAV signal</h2>
-                        <p>Choose an audio file for x[n] — a voice recording shows this off best.</p>
+                        <h2>Bring in an audio signal</h2>
+                        <p>Choose an audio file for x[n], or record one live — a voice recording shows this off best.</p>
                     </div>
                     <div className="upload-group">
                         {inputBuffer && (
@@ -298,9 +394,14 @@ export default function VoiceMorphing() {
                             </div>
                         )}
                         <label className={`upload-module-button ${isProcessing ? "is-disabled" : ""}`}>
-                            {inputBuffer ? "CHANGE WAV" : "CHOOSE WAV"}
+                            {inputBuffer ? "CHANGE AUDIO FILE" : "CHOOSE INPUT AUDIO FILE"}
                             <input ref={inputRef} type="file" accept="audio/*" disabled={isProcessing} onChange={handleFileUpload} />
                         </label>
+                        <MicRecordButton
+                            onRecordingComplete={handleRecordingComplete}
+                            onError={handleRecordingError}
+                            disabled={isProcessing}
+                        />
                     </div>
                 </div>
 
@@ -429,7 +530,14 @@ export default function VoiceMorphing() {
                                         key={`process-${processRunId}`}
                                         morph={backendResult.morph}
                                         loop={false}
-                                        onComplete={() => setAnimationDone(true)}
+                                        onComplete={() => {
+                                            // MorphAnimator only ever mounts once backendResult
+                                            // is already set (see the ternary above), so by the
+                                            // time this fires the backend half is guaranteed to
+                                            // have already arrived — open the modal directly.
+                                            animationDoneRef.current = true;
+                                            setShowModal(true);
+                                        }}
                                     />
                                 ) : (
                                     <div className="spectrum-empty">Waiting for the backend…</div>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./../styles/studio.css";
 import { processChain, getFilterResponse } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 
 const FILTER_FAMILIES = [
     { value: "butterworth", label: "Butterworth" },
@@ -879,11 +880,18 @@ export default function Studio() {
                 <section className="audio-panel has-audio">
                     <div className="panel-label">AUDIO INPUT</div>
                     {!audioFile ? (
-                        <button type="button" className="upload-zone" onClick={() => fileInputRef.current?.click()}>
-                            <div className="upload-icon">＋</div>
-                            <strong>Drop an audio file here</strong>
-                            <span>or click anywhere to upload WAV, MP3, OGG or another browser-supported format</span>
-                        </button>
+                        <>
+                            <button type="button" className="upload-zone" onClick={() => fileInputRef.current?.click()}>
+                                <div className="upload-icon">＋</div>
+                                <strong>Drop an audio file here</strong>
+                                <span>or click anywhere to upload WAV, MP3, OGG or another browser-supported format</span>
+                            </button>
+                            <MicRecordButton
+                                onRecordingComplete={handleFile}
+                                onError={setRunError}
+                                className="studio-mic-button"
+                            />
+                        </>
                     ) : (
                         <>
                             <div className="audio-file-row">
@@ -896,6 +904,7 @@ export default function Studio() {
                                     </span>
                                 </div>
                                 <button type="button" className="secondary-button" onClick={() => fileInputRef.current?.click()}>Replace</button>
+                                <MicRecordButton onRecordingComplete={handleFile} onError={setRunError} />
                             </div>
                             <CustomAudioPlayer src={audioUrl} />
                         </>

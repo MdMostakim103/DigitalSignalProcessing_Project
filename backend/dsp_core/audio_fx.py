@@ -356,6 +356,121 @@ def synthesize_tone(freq: float, duration_seconds: float, sr: int, amplitude: fl
 
 MORPH_MODES = ("pitch", "stretch", "robot", "whisper")
 
+# Named sci-fi "robot voice" presets for morph_mode == "robot". Every preset
+# is a chain of DSP primitives already used elsewhere in this module (pitch
+# shift, filtering, EQ, reverb) plus two new ones below (ring modulation,
+# soft-clip distortion) — not audio cloning and not built from any actual
+# recorded reference voice, just the same category of technique classic
+# sci-fi sound design uses to build a "robot"/"radio"/"masked" character.
+ROBOT_PRESETS = ("classic", "vader", "droid", "trooper", "cylon")
+
+
+def apply_ring_modulation(y: np.ndarray, sr: int, carrier_freq: float = 30.0, mix: float = 1.0) -> np.ndarray:
+    """Multiply the signal by a carrier sine wave. Amplitude-modulating a
+    voice like this creates sum/difference sidebands around every frequency
+    component the voice already has — new frequencies that weren't there
+    before — which is what gives a ring-modulated voice its metallic,
+    buzzing character (unlike pitch-shifting, which only moves existing
+    frequencies around, or filtering, which only removes them).
+
+    mix blends dry/wet (0 = untouched, 1 = fully ring-modulated) so the
+    effect can be layered in underneath other processing instead of always
+    completely replacing the signal.
+    """
+    t = np.arange(len(y)) / sr
+    carrier = np.cos(2 * np.pi * carrier_freq * t)
+    ringed = y * carrier
+    mix = min(1.0, max(0.0, mix))
+    return y * (1 - mix) + ringed * mix
+
+
+def apply_soft_clip(y: np.ndarray, drive: float = 3.0) -> np.ndarray:
+    """tanh soft-clip distortion. Pushes the loudest parts of the waveform
+    toward a smooth ceiling instead of the harsh flat-top a hard clip
+    produces, adding the odd-harmonic "grit" a voice-through-a-small-speaker
+    effect needs without collapsing into pure noise. Dividing by tanh(drive)
+    keeps quiet passages close to unity gain regardless of how hard the
+    loud parts are being driven into the curve.
+    """
+    drive = max(1.0, float(drive))
+    return np.tanh(y * drive) / np.tanh(drive)
+
+
+def apply_robot_voice(
+    y: np.ndarray,
+    sr: int,
+    preset: str = "classic",
+    n_fft: int = 2048,
+    hop_length: int = 512,
+):
+    """Five "robot voice" presets, all built from the same foundation as the
+    original robot morph — every bin's phase zeroed, magnitude kept — with a
+    different chain of coloring effects layered on top of that base for
+    each named character:
+
+    - classic : the zero-phase base alone. Flat, textureless monotone buzz
+                (this is exactly what morph_mode="robot" always did).
+    - vader   : pitched down ~5 semitones, lowpassed so it sounds muffled
+                behind a mask, soft-clipped for grit, then a touch of
+                reverb for a helmet-chamber resonance.
+    - droid   : pitched up slightly with a bright EQ tilt and a faint
+                high-frequency ring modulation, for a prim, fussy, faintly
+                metallic protocol-droid tone.
+    - trooper : squeezed through a narrow "radio" bandpass, buzzed with
+                ring modulation, and dusted with broadband noise for
+                helmet-comms static.
+    - cylon   : the zero-phase base with a heavier ring modulation layered
+                on top — a harsher, more overtly mechanical monotone than
+                "classic" alone.
+
+    Returns (y_out, modified_stft). modified_stft is only populated for
+    "classic" — the one preset whose output really is just that zero-phase
+    spectrum, unmodified afterward. Every other preset keeps processing y_out
+    in the time domain after that point (pitch shift, filtering, ...), so
+    there is no single "the" spectrum left to show for those — the
+    visualizer falls back to re-analyzing y_out directly instead.
+    """
+    if preset not in ROBOT_PRESETS:
+        raise ValueError(f"Unknown robot preset: {preset}")
+
+    # Stage 1 — always: the shared zero-phase "robot" foundation.
+    stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    zero_phase_stft = np.abs(stft).astype(np.complex64)
+    y_out = librosa.istft(zero_phase_stft, hop_length=hop_length, length=len(y))
+
+    # Stage 2 — preset-specific character layered on top of that base.
+    if preset == "classic":
+        pass
+    elif preset == "vader":
+        y_out = librosa.effects.pitch_shift(y=y_out, sr=sr, n_steps=-5.0)
+        y_out = apply_filter(y_out, sr, filter_family="butterworth", band_type="lowpass", cutoff=3000.0, order=4)
+        y_out = apply_soft_clip(y_out, drive=2.5)
+        y_out = apply_reverb(y_out, sr)
+    elif preset == "droid":
+        y_out = librosa.effects.pitch_shift(y=y_out, sr=sr, n_steps=2.5)
+        y_out = apply_equalizer(y_out, sr, low_level=4.0, mid_level=6.0, high_level=8.0)
+        y_out = apply_ring_modulation(y_out, sr, carrier_freq=90.0, mix=0.15)
+    elif preset == "trooper":
+        y_out = apply_filter(y_out, sr, filter_family="butterworth", band_type="bandpass", cutoff=300.0, cutoff2=3000.0, order=4)
+        y_out = apply_ring_modulation(y_out, sr, carrier_freq=40.0, mix=0.28)
+        # Static sized relative to the signal's own RMS (~24 dB SNR), not a
+        # fixed absolute level — a flat 0.02 std swamped this preset's quiet
+        # passages once bandpass+ring-mod had already knocked its RMS down
+        # to ~0.07, giving an ~11 dB SNR that read as pure noise over voice.
+        rms = float(np.sqrt(np.mean(y_out ** 2))) if y_out.size else 0.0
+        noise_std = rms * 0.06
+        rng = np.random.default_rng(1)
+        y_out = y_out + rng.normal(0.0, noise_std, size=len(y_out))
+    elif preset == "cylon":
+        y_out = apply_ring_modulation(y_out, sr, carrier_freq=45.0, mix=0.5)
+
+    peak = np.max(np.abs(y_out))
+    if peak > 0:
+        y_out = y_out / peak
+
+    modified_stft = zero_phase_stft if preset == "classic" else None
+    return y_out, modified_stft
+
 
 def apply_voice_morph(
     y: np.ndarray,
@@ -365,6 +480,7 @@ def apply_voice_morph(
     rate: float = 1.5,
     n_fft: int = 2048,
     hop_length: int = 512,
+    robot_preset: str = "classic",
 ) -> np.ndarray:
     """Four phase-vocoder experiments that separate what the magnitude
     spectrum carries from what the phase carries:
@@ -374,14 +490,17 @@ def apply_voice_morph(
                  resample back — so only the pitch moves.
     - stretch  : change duration, keep pitch. The same phase vocoder, but
                  without the resampling step.
-    - robot    : throw the phase away (set every bin's phase to zero). The
-                 magnitudes are untouched, yet the voice turns into a flat
-                 monotone buzz — that difference *is* the phase.
+    - robot    : throw the phase away (set every bin's phase to zero), then
+                 layer on a named character preset (see apply_robot_voice) —
+                 "classic" reproduces the original flat monotone buzz
+                 exactly; the other presets add pitch/filter/ring-mod/
+                 distortion/reverb coloring on top of that same base.
     - whisper  : randomize the phase instead. Same magnitudes again, but the
                  result is breathy and unvoiced.
 
     Returns (y_out, modified_stft). modified_stft is the spectrum this
-    function actually wrote for robot/whisper, and None for pitch/stretch.
+    function actually wrote for robot/whisper, and None for pitch/stretch
+    (and for every robot preset except "classic" — see apply_robot_voice).
     It matters for the visualization: re-analyzing the reconstructed audio
     would show phase that overlap-add put back, not the phase the morph
     applied, so robot would misleadingly appear to still have phase.
@@ -392,16 +511,14 @@ def apply_voice_morph(
         y_out = librosa.effects.pitch_shift(y=y, sr=sr, n_steps=float(n_steps))
     elif morph_mode == "stretch":
         y_out = librosa.effects.time_stretch(y=y, rate=max(0.25, float(rate)))
-    elif morph_mode in ("robot", "whisper"):
+    elif morph_mode == "robot":
+        y_out, modified_stft = apply_robot_voice(y, sr, preset=robot_preset, n_fft=n_fft, hop_length=hop_length)
+    elif morph_mode == "whisper":
         stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
         magnitude = np.abs(stft)
-        if morph_mode == "robot":
-            # Zero phase everywhere: magnitudes survive, phase does not.
-            modified_stft = magnitude.astype(np.complex64)
-        else:
-            rng = np.random.default_rng(0)
-            random_phase = np.exp(2j * np.pi * rng.random(magnitude.shape))
-            modified_stft = (magnitude * random_phase).astype(np.complex64)
+        rng = np.random.default_rng(0)
+        random_phase = np.exp(2j * np.pi * rng.random(magnitude.shape))
+        modified_stft = (magnitude * random_phase).astype(np.complex64)
         y_out = librosa.istft(modified_stft, hop_length=hop_length, length=len(y))
     else:
         raise ValueError(f"Unknown morph_mode: {morph_mode}")
@@ -624,6 +741,3 @@ def downsample_hold(y: np.ndarray, factor: int) -> np.ndarray:
     hold_index = (np.arange(n) // factor) * factor
     hold_index = np.minimum(hold_index, n - 1)
     return y[hold_index]
-
-
-

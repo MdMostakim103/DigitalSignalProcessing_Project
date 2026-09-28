@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { processAudio } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 import "../styles/amplitude-dynamics.css";
 import "../styles/sampling-quantization.css";
 
@@ -610,62 +611,69 @@ function SignalPlot({
     const hasData = layers.some((layer) => layer.data?.length);
     const interactive = Boolean(onSeek) && !disabled && hasData;
 
-    drawRef.current = (ctx, width, height, font) => {
-        const geo = getGeometry(width, height);
-        drawFrame(ctx, geo, { range, duration, font });
+    // Updated in a layout effect (no dependency array, so it runs after
+    // every render) rather than directly in the render body — this is
+    // read later from a ResizeObserver callback and from the redraw()
+    // calls below, both of which happen outside render, so the function
+    // itself must not be written to a ref while rendering is in progress.
+    useLayoutEffect(() => {
+        drawRef.current = (ctx, width, height, font) => {
+            const geo = getGeometry(width, height);
+            drawFrame(ctx, geo, { range, duration, font });
 
-        if (!hasData) {
-            drawEmptyMessage(ctx, geo, emptyText, font);
-            return;
-        }
+            if (!hasData) {
+                drawEmptyMessage(ctx, geo, emptyText, font);
+                return;
+            }
 
-        const { draw, hand } = revealRef.current;
-        const revealing = draw < 1;
+            const { draw, hand } = revealRef.current;
+            const revealing = draw < 1;
 
-        layers.forEach((layer) => {
-            if (!layer.data?.length) return;
+            layers.forEach((layer) => {
+                if (!layer.data?.length) return;
 
-            const points = toPoints(layer.data, geo, range);
-            drawCurve(ctx, points, {
-                color: layer.color,
-                width: layer.width ?? 2.2,
-                glow: 9,
-                clipX: revealing ? geo.left + geo.plotW * draw : null,
+                const points = toPoints(layer.data, geo, range);
+                drawCurve(ctx, points, {
+                    color: layer.color,
+                    width: layer.width ?? 2.2,
+                    glow: 9,
+                    clipX: revealing ? geo.left + geo.plotW * draw : null,
+                });
+
+                const headAlpha = revealing ? 1 : 1 - hand;
+                if (headAlpha > 0.01) {
+                    const head = pointAt(points, revealing ? draw : 1);
+                    drawScanLine(ctx, geo, head.x, layer.color, 0.4 * headAlpha);
+                    drawPointer(ctx, head, layer.color, 6, headAlpha);
+                }
+
+                if (Number.isFinite(layer.marker)) {
+                    const alpha = revealing ? 0 : hand;
+                    if (alpha > 0.01) {
+                        const playhead = pointAt(points, layer.marker);
+                        drawScanLine(ctx, geo, playhead.x, "#ffffff", 0.3 * alpha);
+                        drawPointer(ctx, playhead, layer.color, 6, alpha);
+                    }
+                }
             });
 
-            const headAlpha = revealing ? 1 : 1 - hand;
-            if (headAlpha > 0.01) {
-                const head = pointAt(points, revealing ? draw : 1);
-                drawScanLine(ctx, geo, head.x, layer.color, 0.4 * headAlpha);
-                drawPointer(ctx, head, layer.color, 6, headAlpha);
-            }
+            const hover = hoverRef.current;
+            if (hover !== null && interactive && !revealing) {
+                const x = geo.left + geo.plotW * hover;
+                drawScanLine(ctx, geo, x, "#ffffff", 0.24);
 
-            if (Number.isFinite(layer.marker)) {
-                const alpha = revealing ? 0 : hand;
-                if (alpha > 0.01) {
-                    const playhead = pointAt(points, layer.marker);
-                    drawScanLine(ctx, geo, playhead.x, "#ffffff", 0.3 * alpha);
-                    drawPointer(ctx, playhead, layer.color, 6, alpha);
+                if (duration > 0) {
+                    ctx.save();
+                    ctx.font = `600 10px ${font}`;
+                    ctx.fillStyle = "rgba(255,255,255,.8)";
+                    ctx.textBaseline = "top";
+                    ctx.textAlign = hover > 0.5 ? "right" : "left";
+                    ctx.fillText(formatAxisTime(hover * duration), x + (hover > 0.5 ? -6 : 6), geo.top + 5);
+                    ctx.restore();
                 }
             }
-        });
-
-        const hover = hoverRef.current;
-        if (hover !== null && interactive && !revealing) {
-            const x = geo.left + geo.plotW * hover;
-            drawScanLine(ctx, geo, x, "#ffffff", 0.24);
-
-            if (duration > 0) {
-                ctx.save();
-                ctx.font = `600 10px ${font}`;
-                ctx.fillStyle = "rgba(255,255,255,.8)";
-                ctx.textBaseline = "top";
-                ctx.textAlign = hover > 0.5 ? "right" : "left";
-                ctx.fillText(formatAxisTime(hover * duration), x + (hover > 0.5 ? -6 : 6), geo.top + 5);
-                ctx.restore();
-            }
-        }
-    };
+        };
+    });
 
     useLayoutEffect(() => {
         if (!reveal || !revealKey?.length) {
@@ -823,9 +831,13 @@ function ProcessingPanel({
 
     // Once the backend run has completed, keep the center visualization
     // alive, cycling instead of becoming a static "COMPLETE" card.
+    // loopProgress is only ever read below while phase === "complete", so
+    // there is nothing to reset when leaving that phase — the next time
+    // phase becomes "complete" again this effect restarts its own
+    // performance.now() baseline and the very first tick lands loopProgress
+    // back near 0 anyway.
     useEffect(() => {
         if (phase !== "complete") {
-            setLoopProgress(0);
             return undefined;
         }
 
@@ -849,12 +861,16 @@ function ProcessingPanel({
     const local = phaseLocal(displayPhase, displayProgress);
     const count = data?.length || 0;
 
+    // Updated in a layout effect (no dependency array, so it runs after
+    // every render) rather than directly in the render body — see the
+    // matching comment on the SignalPlot component above for why.
+    useLayoutEffect(() => {
     drawRef.current = (ctx, width, height, font) => {
         const geo = getGeometry(width, height);
         drawFrame(ctx, geo, { range, duration, font });
 
         if (!count) {
-            drawEmptyMessage(ctx, geo, "Upload a WAV to begin", font);
+            drawEmptyMessage(ctx, geo, "Upload audio to begin", font);
             return;
         }
 
@@ -932,6 +948,7 @@ function ProcessingPanel({
             drawPointer(ctx, head, OUTPUT_COLOR, 7);
         }
     };
+    });
 
     useLayoutEffect(() => {
         redraw();
@@ -950,7 +967,7 @@ function ProcessingPanel({
             : null;
 
     const statusText = (() => {
-        if (!count) return "Upload a WAV to begin.";
+        if (!count) return "Upload audio to begin.";
         if (phase === "complete") return "Backend result complete — replaying the transformation continuously.";
         if (displayPhase === "load") return "Reading the input samples from left to right…";
         if (displayPhase === "multiply") return statusVerb;
@@ -1184,10 +1201,6 @@ function SamplingQuantization() {
 
     const selectFile = async (file) => {
         if (!file || processing) return;
-        if (!file.name.toLowerCase().endsWith(".wav")) {
-            setError("Please choose a WAV file.");
-            return;
-        }
 
         const loadId = loadIdRef.current + 1;
         loadIdRef.current = loadId;
@@ -1227,7 +1240,7 @@ function SamplingQuantization() {
             console.error(err);
             setInputData(null);
             setDuration(0);
-            setError("The WAV file could not be decoded in the browser.");
+            setError("That audio file could not be decoded in the browser.");
         }
     };
 
@@ -1411,8 +1424,8 @@ function SamplingQuantization() {
                 >
                     <div>
                         <span className="control-kicker">01 / INPUT</span>
-                        <h2>Bring in a WAV signal</h2>
-                        <p>Choose an audio file or drop it here. The signal becomes the input to the operation.</p>
+                        <h2>Bring in an audio signal</h2>
+                        <p>Choose an audio file or drop it here, or record one live. The signal becomes the input to the operation.</p>
                     </div>
                     <div className="upload-group">
                         {audioFile && (
@@ -1432,8 +1445,13 @@ function SamplingQuantization() {
                                     selectFile(file);
                                 }}
                             />
-                            {audioFile ? "CHANGE WAV" : "CHOOSE WAV"}
+                            {audioFile ? "CHANGE AUDIO FILE" : "CHOOSE INPUT AUDIO FILE"}
                         </label>
+                        <MicRecordButton
+                            onRecordingComplete={selectFile}
+                            onError={setError}
+                            disabled={processing}
+                        />
                     </div>
                 </div>
 
@@ -1499,7 +1517,7 @@ function SamplingQuantization() {
                             onSeek={(ratio) => seekAudio("input", ratio)}
                             disabled={processing}
                             label="Input"
-                            emptyText="Upload a WAV to begin"
+                            emptyText="Upload audio to begin"
                             title="x[n] · ORIGINAL SIGNAL"
                             meta={formatMeta(inputMeta)}
                         />

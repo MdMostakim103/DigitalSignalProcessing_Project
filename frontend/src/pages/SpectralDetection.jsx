@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "../styles/time-domain.css";
 import { processAudio } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 import PitchAnimator from "../components/Visualizations/PitchAnimator";
 import EffectAnimator from "../components/Visualizations/EffectAnimator";
 import FrequencySpectrumAnimator from "../components/Visualizations/FrequencySpectrumAnimator";
@@ -60,7 +61,6 @@ export default function SpectralDetection() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [warning, setWarning] = useState("");
     const [showVisualizer, setShowVisualizer] = useState(false);
-    const [animationDone, setAnimationDone] = useState(false);
 
     const [backendResult, setBackendResult] = useState(null);
     const [showModal, setShowModal] = useState(false);
@@ -80,6 +80,12 @@ export default function SpectralDetection() {
     const inputRef = useRef(null);
     const audioCtxRef = useRef(null);
     const inputUrlRef = useRef("");
+    // Only ever read to decide whether both halves of a run have finished
+    // (the animation and the backend response) — never rendered, so a ref
+    // avoids an extra render on its own and lets setShowModal be called
+    // directly from whichever completion happens second, instead of
+    // combining the two in an effect.
+    const animationDoneRef = useRef(false);
 
     const nyquist = Math.max(RANGE_LIMIT.min + 100, Math.floor(sampleRate / 2) - 50);
     const rangeMax = Math.min(RANGE_LIMIT.max, nyquist);
@@ -99,16 +105,14 @@ export default function SpectralDetection() {
 
     const resetVisualizerState = () => {
         setShowVisualizer(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setBackendResult(null);
         setShowModal(false);
         setDomain("process");
         setModalDomain("time");
     };
 
-    const handleFileUpload = async (event) => {
-        const file = event.target.files?.[0];
-        event.target.value = "";
+    const loadFile = async (file) => {
         if (!file) return;
 
         try {
@@ -139,6 +143,20 @@ export default function SpectralDetection() {
         resetVisualizerState();
     };
 
+    const handleFileUpload = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        await loadFile(file);
+    };
+
+    const handleRecordingComplete = async (file) => {
+        await loadFile(file);
+    };
+
+    const handleRecordingError = (message) => {
+        setWarning(message);
+    };
+
     // Peak-picking on a full FFT isn't something you can meaningfully
     // hand-animate sample-by-sample in the browser. So, same approach as the
     // other modules: the animation plays back the backend's own binned
@@ -151,7 +169,7 @@ export default function SpectralDetection() {
         setWarning("");
         setBackendResult(null);
         setShowModal(false);
-        setAnimationDone(false);
+        animationDoneRef.current = false;
         setDomain("process");
         setModalDomain("time");
         setShowVisualizer(true);
@@ -166,6 +184,10 @@ export default function SpectralDetection() {
                 { pitch_fmin: fmin, pitch_fmax: fmax }
             );
             setBackendResult(result);
+            // PitchAnimator only mounts once backendResult is already set,
+            // so this can't race the animation's own completion — this
+            // check is a defensive no-op unless that gating ever changes.
+            if (animationDoneRef.current) setShowModal(true);
         } catch (err) {
             console.error(err);
             setWarning("Failed to connect to the FastAPI backend on port 8000.");
@@ -174,10 +196,6 @@ export default function SpectralDetection() {
             setIsProcessing(false);
         }
     };
-
-    useEffect(() => {
-        if (animationDone && backendResult) setShowModal(true);
-    }, [animationDone, backendResult]);
 
     const isRunDisabled = isProcessing || !inputFile || fmin >= fmax;
 
@@ -221,8 +239,8 @@ export default function SpectralDetection() {
                 <div className="module-controls" style={{ marginBottom: "40px" }}>
                     <div>
                         <span className="control-kicker">01 / INPUT SIGNAL</span>
-                        <h2>Bring in a WAV signal</h2>
-                        <p>Choose an audio file for x[n].</p>
+                        <h2>Bring in an audio signal</h2>
+                        <p>Choose an audio file for x[n], or record one live.</p>
                     </div>
                     <div className="upload-group">
                         {inputBuffer && (
@@ -232,9 +250,14 @@ export default function SpectralDetection() {
                             </div>
                         )}
                         <label className={`upload-module-button ${isProcessing ? "is-disabled" : ""}`}>
-                            {inputBuffer ? "CHANGE WAV" : "CHOOSE WAV"}
+                            {inputBuffer ? "CHANGE AUDIO FILE" : "CHOOSE INPUT AUDIO FILE"}
                             <input ref={inputRef} type="file" accept="audio/*" disabled={isProcessing} onChange={handleFileUpload} />
                         </label>
+                        <MicRecordButton
+                            onRecordingComplete={handleRecordingComplete}
+                            onError={handleRecordingError}
+                            disabled={isProcessing}
+                        />
                     </div>
                 </div>
 
@@ -360,7 +383,13 @@ export default function SpectralDetection() {
                                         key={`process-${processRunId}`}
                                         pitch={backendResult.pitch}
                                         loop={false}
-                                        onComplete={() => setAnimationDone(true)}
+                                        onComplete={() => {
+                                            // This branch only renders once backendResult
+                                            // already exists, so the backend half is
+                                            // guaranteed to have already arrived here.
+                                            animationDoneRef.current = true;
+                                            setShowModal(true);
+                                        }}
                                     />
                                 ) : (
                                     <div className="spectrum-empty">Waiting for the backend…</div>

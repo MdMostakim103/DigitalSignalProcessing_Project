@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "../styles/time-domain.css";
 import { getSpectrogram, applySpectralMask } from "../services/api";
+import MicRecordButton from "../components/AudioInput/MicRecordButton";
 
 // A gold/purple/navy ramp so the heatmap matches the rest of the app's
 // accent palette instead of a generic scientific colormap.
@@ -86,17 +87,6 @@ function SpectrogramCanvas({ spectrogram, regions = [], onRegionsChange, current
     const duration = spectrogram?.duration || 0;
     const maxFrequency = spectrogram?.maxFrequency || 0;
 
-    useEffect(() => {
-        if (spectrogram?.freqBins) paintHeatmap(offscreenRef.current, spectrogram);
-        draw();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [spectrogram]);
-
-    useEffect(() => {
-        draw();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [regions, draft]);
-
     function draw() {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -135,6 +125,17 @@ function SpectrogramCanvas({ spectrogram, regions = [], onRegionsChange, current
         }
         if (draft) drawRect(draft, currentAction);
     }
+
+    useEffect(() => {
+        if (spectrogram?.freqBins) paintHeatmap(offscreenRef.current, spectrogram);
+        draw();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [spectrogram]);
+
+    useEffect(() => {
+        draw();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [regions, draft]);
 
     function pixelToRegion(rect) {
         const x0 = Math.min(rect.x0, rect.x1);
@@ -182,7 +183,6 @@ function SpectrogramCanvas({ spectrogram, regions = [], onRegionsChange, current
         dragRef.current = null;
         setDraft(null);
 
-        const canvas = canvasRef.current;
         if (Math.abs(rect.x1 - rect.x0) < 4 || Math.abs(rect.y1 - rect.y0) < 4) return; // ignore accidental clicks
         const region = pixelToRegion(rect);
         onRegionsChange([
@@ -249,9 +249,7 @@ export default function SpectralPortal() {
 
     const hasKeepRegion = useMemo(() => regions.some((r) => r.action === "keep"), [regions]);
 
-    const handleFileUpload = async (event) => {
-        const file = event.target.files?.[0];
-        event.target.value = "";
+    const loadFile = async (file) => {
         if (!file) return;
 
         if (inputUrlRef.current) URL.revokeObjectURL(inputUrlRef.current);
@@ -278,6 +276,20 @@ export default function SpectralPortal() {
         } finally {
             setIsLoadingSpectrogram(false);
         }
+    };
+
+    const handleFileUpload = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        await loadFile(file);
+    };
+
+    const handleRecordingComplete = async (file) => {
+        await loadFile(file);
+    };
+
+    const handleRecordingError = (message) => {
+        setWarning(message);
     };
 
     const removeRegion = (id) => setRegions((prev) => prev.filter((r) => r.id !== id));
@@ -325,7 +337,7 @@ export default function SpectralPortal() {
                 <div className="module-controls" style={{ marginBottom: "24px" }}>
                     <div>
                         <span className="control-kicker">01 / INPUT SIGNAL</span>
-                        <h2>Bring in a WAV signal</h2>
+                        <h2>Bring in an audio signal</h2>
                         <p>Any audio works — a clip with a few distinct sounds (voice + background noise, a chirp, a tone) shows this off best.</p>
                     </div>
                     <div className="upload-group">
@@ -336,9 +348,14 @@ export default function SpectralPortal() {
                             </div>
                         )}
                         <label className={`upload-module-button ${isProcessing ? "is-disabled" : ""}`}>
-                            {inputFile ? "CHANGE WAV" : "CHOOSE WAV"}
+                            {inputFile ? "CHANGE AUDIO FILE" : "CHOOSE INPUT AUDIO FILE"}
                             <input type="file" accept="audio/*" disabled={isProcessing} onChange={handleFileUpload} />
                         </label>
+                        <MicRecordButton
+                            onRecordingComplete={handleRecordingComplete}
+                            onError={handleRecordingError}
+                            disabled={isProcessing}
+                        />
                     </div>
                 </div>
 
