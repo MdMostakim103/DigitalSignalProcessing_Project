@@ -202,7 +202,7 @@ export default function SpectralDetection() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={isProcessing}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 04 / SPECTRAL DETECTION</span>
+                <span>MODULE 03 / SPECTRAL DETECTION</span>
             </div>
 
             <div className="module-intro">

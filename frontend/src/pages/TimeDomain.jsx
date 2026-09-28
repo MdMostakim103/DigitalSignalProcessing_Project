@@ -263,7 +263,7 @@ export default function TimeDomain() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={isProcessing}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 03 / TIME-DOMAIN PROCESSING</span>
+                <span>MODULE 02 / TIME-DOMAIN PROCESSING</span>
             </div>
 
             <div className="module-intro">

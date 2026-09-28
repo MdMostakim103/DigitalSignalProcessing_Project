@@ -14,8 +14,9 @@ from dsp_core.audio_fx import (
     apply_convolution, apply_noise_reduction, apply_equalizer,
     apply_filter, compute_filter_frequency_response,
     detect_dominant_frequency, freq_to_note, synthesize_tone,
-    apply_voice_morph, signal_level_stats,
+    apply_voice_morph, signal_level_stats, signal_stats,
     choose_spectrogram_hop_length, apply_spectral_mask,
+    quantize_bitdepth, downsample_hold,
 )
 from dsp_core.visualizer import (
     generate_comparison_plot, build_visualization_data, filter_response_bars,
@@ -76,6 +77,8 @@ async def process_audio(
     delay_ms: float = Form(280.0),
     decay: float = Form(0.55),
     repeats: int = Form(5),
+    bits: int = Form(16),
+    downsample_factor: int = Form(1),
 ):
 
     # 1. Save to uploads/
@@ -90,6 +93,8 @@ async def process_audio(
     filter_response_data = None
     pitch_data = None
     morph_data = None
+    stats_in = None
+    stats_out = None
     if effect == "convolution":
         if ir_file is None:
             raise HTTPException(
@@ -111,6 +116,16 @@ async def process_audio(
         y_modified = apply_reverb(y, sr)
     elif effect == "amplify":
         y_modified = amplify_volume(y, value)
+        stats_in = signal_stats(y)
+        stats_out = signal_stats(y_modified)
+    elif effect == "quantize":
+        # Bit-depth reduction only — no downsampling mixed in, so the
+        # Sampling & Quantization module can demonstrate each effect on
+        # its own instead of always showing them combined.
+        y_modified = quantize_bitdepth(y, bits)
+    elif effect == "downsample":
+        # Sample-and-hold only — no requantization mixed in.
+        y_modified = downsample_hold(y, downsample_factor)
     elif effect == "noise":
         y_modified = apply_noise_reduction(y, sr)
     elif effect == "equalizer":
@@ -154,6 +169,8 @@ async def process_audio(
         "visualization": visualization,
         "pitch": pitch_data,
         "morph": morph_data,
+        "stats_in": stats_in,
+        "stats_out": stats_out,
     }
 
 

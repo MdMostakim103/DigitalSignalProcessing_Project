@@ -8,17 +8,19 @@ import SpectralDetection from "./pages/SpectralDetection";
 import VoiceMorphing from "./pages/VoiceMorphing";
 import BirdDetector from "./pages/BirdDetector";
 import SpectralPortal from "./pages/SpectralPortal";
+import SamplingQuantization from "./pages/SamplingQuantization";
 
 function getRoute() {
     const hash = window.location.hash;
     if (hash === "#studio") return "studio";
     if (hash === "#module/01") return "amplitude";
-    if (hash === "#module/02") return "frequencyFiltering";
-    if (hash === "#module/03") return "timeDomain";
-    if (hash === "#module/04") return "spectralDetection";
-    if (hash === "#module/05") return "voiceMorphing";
-    if (hash === "#module/06") return "birdDetector";
-    if (hash === "#module/07") return "spectralPortal";
+    if (hash === "#module/02") return "timeDomain";
+    if (hash === "#module/03") return "spectralDetection";
+    if (hash === "#module/04") return "birdDetector";
+    if (hash === "#module/05") return "samplingQuantization";
+    if (hash === "#module/06") return "frequencyFiltering";
+    if (hash === "#module/07") return "voiceMorphing";
+    if (hash === "#module/08") return "spectralPortal";
 
     return "home";
 }
@@ -40,6 +42,7 @@ function App() {
     if (route === "voiceMorphing") return <VoiceMorphing />;
     if (route === "birdDetector") return <BirdDetector />;
     if (route === "spectralPortal") return <SpectralPortal />;
+    if (route === "samplingQuantization") return <SamplingQuantization />;
 
     return <Home />;
 }

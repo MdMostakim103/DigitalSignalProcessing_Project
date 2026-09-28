@@ -1,0 +1,78 @@
+/* Sampling & Quantization -- Module 05.
+   The page reuses .amplitude-page / .range-input / .math-* / .signal-* /
+   .plot-* / .processing-panel / .module-* classes straight from
+   amplitude-dynamics.css (imported alongside this file) so it matches the
+   existing theme exactly. Only two things are new here: the mode switcher
+   (quantize vs. sample-and-hold -- same pattern TimeDomain.jsx uses for
+   echo/delay/convolution, copied from time-domain.css rather than
+   importing that whole file, which would collide with amplitude-dynamics.css's
+   own same-named classes) and the single-slider control row (amplitude-
+   dynamics.css's .gain-control-row is built specifically around a gain
+   readout + presets, not a generic slider). */
+
+.mode-selector-row {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 28px;
+    margin-top: 40px;
+    margin-bottom: 20px;
+}
+
+.mode-selector-row button {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 48px;
+    font-size: 14px;
+    letter-spacing: 1.5px;
+    font-weight: 800;
+    cursor: pointer;
+    background: rgba(255, 255, 255, .06);
+    color: #fff;
+    transition: all .2s ease;
+}
+
+.mode-selector-row button.selected {
+    border-color: var(--accent-primary);
+    background: rgba(247, 184, 1, .12);
+    color: var(--accent-primary);
+    box-shadow: 0 4px 20px rgba(247, 184, 1, .15);
+}
+
+.sq-control-row {
+    margin: 16px 0;
+    padding: 22px 28px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 26px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-medium);
+    background: rgba(0, 0, 0, .09);
+}
+
+.sq-slider-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.sq-slider-readout {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+}
+
+.sq-slider-readout strong {
+    font-size: 22px;
+}
+
+.sq-slider-readout small {
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: rgba(255, 255, 255, .5);
+    font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+    .mode-selector-row button { flex: 1 1 100%; }
+}

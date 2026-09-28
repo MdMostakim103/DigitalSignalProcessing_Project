@@ -580,4 +580,50 @@ def signal_level_stats(y: np.ndarray) -> dict:
     return {"peak": peak, "rms": rms, "db": float(db)}
 
 
+def signal_stats(y: np.ndarray) -> dict:
+    """Peak, RMS and clipping percentage for a signal — the quick before/
+    after health check a gain change needs. clip_percent is the percentage
+    of samples whose absolute value exceeds 1.0 (full scale for a
+    normalized float signal), i.e. samples that would clip on playback or
+    when written out as fixed-point PCM."""
+    if y is None or y.size == 0:
+        return {"peak": 0.0, "rms": 0.0, "clip_percent": 0.0}
+
+    peak = float(np.max(np.abs(y)))
+    rms = float(np.sqrt(np.mean(y.astype(np.float64) ** 2)))
+    clip_percent = float(np.mean(np.abs(y) > 1.0) * 100)
+    return {"peak": peak, "rms": rms, "clip_percent": clip_percent}
+
+
+def quantize_bitdepth(y: np.ndarray, bits: int) -> np.ndarray:
+    """Uniform requantization to `bits`-bit resolution: round every sample
+    to the nearest of 2**bits evenly spaced levels across [-1, 1] — the
+    same reduced-resolution effect a low-bit-depth ADC/DAC has on a signal,
+    audible as added quantization noise/"crunch" as bits drops."""
+    bits = max(1, min(16, int(bits)))
+    levels = 2 ** bits
+    step = 2.0 / (levels - 1) if levels > 1 else 2.0
+
+    y_clipped = np.clip(y, -1.0, 1.0)
+    y_quantized = np.round(y_clipped / step) * step
+    return np.clip(y_quantized, -1.0, 1.0)
+
+
+def downsample_hold(y: np.ndarray, factor: int) -> np.ndarray:
+    """Sample-and-hold at a lower effective rate: keep every `factor`-th
+    sample and repeat it to fill the gap, instead of interpolating. This is
+    exactly what a zero-order-hold DAC does when fed a lower sample rate,
+    and it's what makes aliasing audible — the output is the same length
+    as the input (each held sample just repeats), so it stays directly
+    comparable to the original sample-for-sample."""
+    factor = max(1, int(factor))
+    if factor == 1 or y.size == 0:
+        return y.copy()
+
+    n = y.size
+    hold_index = (np.arange(n) // factor) * factor
+    hold_index = np.minimum(hold_index, n - 1)
+    return y[hold_index]
+
+
 

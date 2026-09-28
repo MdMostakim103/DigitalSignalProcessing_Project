@@ -295,7 +295,7 @@ export default function FrequencyFiltering() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={isProcessing}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 02 / FREQUENCY &amp; FILTERING</span>
+                <span>MODULE 06 / FREQUENCY &amp; FILTERING</span>
             </div>
 
             <div className="module-intro">

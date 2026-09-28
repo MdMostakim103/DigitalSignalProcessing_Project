@@ -307,7 +307,7 @@ export default function SpectralPortal() {
                 <button className="back-button" onClick={() => { window.location.hash = ""; }} disabled={isProcessing}>
                     ← DSP MODULES
                 </button>
-                <span>MODULE 07 / SPECTRAL PORTAL</span>
+                <span>MODULE 08 / SPECTRAL PORTAL</span>
             </div>
 
             <div className="module-intro">
